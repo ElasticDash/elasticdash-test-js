@@ -50,7 +50,7 @@ async function bootstrap(): Promise<void> {
   let version = 'unknown'
   try {
     // @ts-ignore
-    version = (await import(pathToFileURL(path.join(cwd, 'package.json')).href, { assert: { type: 'json' } })).default.version
+    version = (await import(pathToFileURL(path.join(cwd, 'package.json')).href, { with: { type: 'json' } })).default.version
   } catch (e) {
     try {
       version = require(path.join(cwd, 'package.json')).version
@@ -71,7 +71,10 @@ async function bootstrap(): Promise<void> {
     .description('Discover and run all AI test files')
     .action(async (dir?: string) => {
       const searchBase = dir ? path.resolve(cwd, dir) : cwd
+      console.log('[elasticdash] Test discovery pattern:', defaultPattern)
+      console.log('[elasticdash] Test search base:', searchBase)
       const files = await discoverTestFiles(defaultPattern, searchBase)
+      console.log('[elasticdash] Discovered test files:', files)
 
       if (files.length === 0) {
         console.error(`No test files found matching: ${defaultPattern.join(', ')}`)
@@ -79,6 +82,10 @@ async function bootstrap(): Promise<void> {
       }
 
       const results = await runFiles(files)
+      // Log registered tests
+      const { getRegistry } = await import('./core/registry.js')
+      const registry = getRegistry()
+      console.log('[elasticdash] Tests registered:', registry.tests.map(t => t.name))
       reportResults(results)
 
       const anyFailed = results.some((fr) => fr.results.some((r) => !r.passed))

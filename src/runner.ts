@@ -1,6 +1,8 @@
 import { clearRegistry, getRegistry } from './core/registry.js'
 import { startTraceSession } from './trace-adapter/context.js'
 import type { RunnerHooks } from './trace-adapter/context.js'
+import { pathToFileURL } from 'node:url'
+import path from 'node:path'
 
 export interface TestResult {
   name: string
@@ -36,7 +38,16 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
   clearRegistry()
 
   // 2. Dynamically import the test file (triggers aiTest() registrations)
-  await import(file)
+  const resolvedPath = file.startsWith('file://')
+    ? file
+    : pathToFileURL(path.resolve(file)).href
+
+  if (resolvedPath.endsWith('.ts')) {
+    await import('tsx/esm')
+    await import('tsx/cjs')
+  }
+
+  await import(resolvedPath)
 
   const registry = getRegistry()
   const results: TestResult[] = []
