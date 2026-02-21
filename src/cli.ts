@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import 'dotenv/config'
 import { Command } from 'commander'
 import fg from 'fast-glob'
 import path from 'node:path'
