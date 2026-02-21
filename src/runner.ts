@@ -1,6 +1,7 @@
 import { clearRegistry, getRegistry } from './core/registry.js'
 import { startTraceSession } from './trace-adapter/context.js'
 import type { RunnerHooks } from './trace-adapter/context.js'
+import { setCurrentTrace } from './interceptors/ai-interceptor.js'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 
@@ -69,11 +70,14 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
     let passed = false
     let error: Error | undefined
 
+    setCurrentTrace(context.trace)
     try {
       await entry.fn(context)
       passed = true
     } catch (err) {
       error = err instanceof Error ? err : new Error(String(err))
+    } finally {
+      setCurrentTrace(null)
     }
 
     const durationMs = Date.now() - startTime

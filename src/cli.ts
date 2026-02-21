@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { existsSync } from 'node:fs'
 
 import { registerMatchers } from './matchers/index.js'
+import { installAIInterceptor } from './interceptors/ai-interceptor.js'
 import { runFiles } from './runner.js'
 import { reportResults } from './reporter.js'
 
@@ -39,7 +40,7 @@ async function discoverTestFiles(patterns: string[], cwd: string): Promise<strin
 async function bootstrap(): Promise<void> {
 
   registerMatchers()
-
+  installAIInterceptor()
 
   const cwd = process.cwd()
   const config = await loadConfig(cwd)

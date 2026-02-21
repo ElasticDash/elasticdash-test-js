@@ -1,5 +1,6 @@
 export interface LLMStep {
   model: string
+  provider?: string   // 'openai' | 'gemini' | 'grok' | undefined
   prompt?: string
   completion?: string
   contains?: string

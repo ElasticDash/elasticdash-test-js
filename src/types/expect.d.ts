@@ -2,8 +2,11 @@ import 'expect';
 import type { TraceHandle } from '../trace-adapter/context';
 
 interface LLMStepConfig {
-  model?: string;
-  contains?: string;
+  model?: string
+  contains?: string        // searches prompt + completion
+  promptContains?: string  // searches only in step.prompt
+  outputContains?: string  // searches only in step.completion
+  provider?: string        // 'openai' | 'gemini' | 'grok'
 }
 
 declare module 'expect' {

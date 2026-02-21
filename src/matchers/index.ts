@@ -3,7 +3,10 @@ import type { TraceHandle, LLMStep } from '../trace-adapter/context.js'
 
 interface LLMStepConfig {
   model?: string
-  contains?: string
+  contains?: string        // searches prompt + completion
+  promptContains?: string  // searches only in step.prompt
+  outputContains?: string  // searches only in step.completion
+  provider?: string        // 'openai' | 'gemini' | 'grok'
 }
 
 /**
@@ -90,12 +93,21 @@ export function registerMatchers(): void {
 
       const matching = steps.filter((step: LLMStep) => {
         if (config.model && step.model !== config.model) return false
+        if (config.provider && step.provider !== config.provider) return false
         if (config.contains) {
           const haystack = [step.completion, step.prompt, step.contains]
             .filter(Boolean)
             .join(' ')
             .toLowerCase()
           if (!haystack.includes(config.contains.toLowerCase())) return false
+        }
+        if (config.promptContains) {
+          const promptHaystack = (step.prompt ?? '').toLowerCase()
+          if (!promptHaystack.includes(config.promptContains.toLowerCase())) return false
+        }
+        if (config.outputContains) {
+          const outputHaystack = (step.completion ?? '').toLowerCase()
+          if (!outputHaystack.includes(config.outputContains.toLowerCase())) return false
         }
         return true
       })
