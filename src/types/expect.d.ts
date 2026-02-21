@@ -7,6 +7,9 @@ interface LLMStepConfig {
   promptContains?: string  // searches only in step.prompt
   outputContains?: string  // searches only in step.completion
   provider?: string        // 'openai' | 'gemini' | 'grok'
+  times?: number           // match count must equal exactly this value
+  minTimes?: number        // match count must be >= this value
+  maxTimes?: number        // match count must be <= this value
 }
 
 declare module 'expect' {

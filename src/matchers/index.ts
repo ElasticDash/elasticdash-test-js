@@ -7,6 +7,9 @@ interface LLMStepConfig {
   promptContains?: string  // searches only in step.prompt
   outputContains?: string  // searches only in step.completion
   provider?: string        // 'openai' | 'gemini' | 'grok'
+  times?: number           // match count must equal exactly this value
+  minTimes?: number        // match count must be >= this value
+  maxTimes?: number        // match count must be <= this value
 }
 
 /**
@@ -112,7 +115,17 @@ export function registerMatchers(): void {
         return true
       })
 
-      const pass = matching.length > 0
+      const count = matching.length
+      let pass: boolean
+      if (config.times !== undefined) {
+        pass = count === config.times
+      } else if (config.minTimes !== undefined || config.maxTimes !== undefined) {
+        const min = config.minTimes ?? 0
+        const max = config.maxTimes ?? Infinity
+        pass = count >= min && count <= max
+      } else {
+        pass = count > 0
+      }
 
       return {
         pass,
@@ -123,7 +136,7 @@ export function registerMatchers(): void {
           const stepSummary =
             steps.length === 0
               ? 'no LLM steps were recorded'
-              : `recorded steps: ${JSON.stringify(steps)}`
+              : `${count} matching step(s) found; recorded steps: ${JSON.stringify(steps)}`
           return `Expected trace to have LLM step matching ${JSON.stringify(config)}, but ${stepSummary}`
         },
       }

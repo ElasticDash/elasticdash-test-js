@@ -108,11 +108,14 @@ Assert the trace contains at least one LLM step matching the given config. All f
 
 ```ts
 expect(ctx.trace).toHaveLLMStep({ model: 'gpt-4' })
-expect(ctx.trace).toHaveLLMStep({ contains: 'order confirmed' })      // searches prompt + completion
-expect(ctx.trace).toHaveLLMStep({ promptContains: 'order status' })   // searches prompt only
+expect(ctx.trace).toHaveLLMStep({ contains: 'order confirmed' })       // searches prompt + completion
+expect(ctx.trace).toHaveLLMStep({ promptContains: 'order status' })    // searches prompt only
 expect(ctx.trace).toHaveLLMStep({ outputContains: 'order confirmed' }) // searches completion only
 expect(ctx.trace).toHaveLLMStep({ provider: 'openai' })
 expect(ctx.trace).toHaveLLMStep({ provider: 'openai', promptContains: 'order status' })
+expect(ctx.trace).toHaveLLMStep({ promptContains: 'retry', times: 3 })      // exactly 3 matching steps
+expect(ctx.trace).toHaveLLMStep({ provider: 'openai', minTimes: 2 })        // at least 2 matching steps
+expect(ctx.trace).toHaveLLMStep({ outputContains: 'error', maxTimes: 1 })   // at most 1 matching step
 ```
 
 | Field | Description |
@@ -122,6 +125,9 @@ expect(ctx.trace).toHaveLLMStep({ provider: 'openai', promptContains: 'order sta
 | `promptContains` | Substring match in prompt only (case-insensitive) |
 | `outputContains` | Substring match in completion only (case-insensitive) |
 | `provider` | Provider name: `'openai'`, `'gemini'`, or `'grok'` |
+| `times` | Exact match count (fails unless exactly this many steps match) |
+| `minTimes` | Minimum match count (steps matching must be ≥ this value) |
+| `maxTimes` | Maximum match count (steps matching must be ≤ this value) |
 
 #### `toCallTool(toolName)`
 
