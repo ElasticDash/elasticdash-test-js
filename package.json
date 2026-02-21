@@ -1,6 +1,6 @@
 {
   "name": "elasticdash-test",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "AI-native test runner for ElasticDash workflow testing",
   "type": "module",
   "bin": {
@@ -30,5 +30,11 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "author": "ElasticDash <contact@elasticdash.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ElasticDash/elasticdash-test-js.git"
   }
 }

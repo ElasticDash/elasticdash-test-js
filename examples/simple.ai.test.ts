@@ -1,5 +1,5 @@
 import '../src/test-setup.js'
-import { expect } from 'expect'
+import { expect } from '../src/matchers/index.js'
 import type { AITestContext } from '../src/trace-adapter/context.js'
 
 // Simulate an LLM call that records itself into the trace

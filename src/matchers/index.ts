@@ -105,3 +105,6 @@ export function registerMatchers(): void {
     },
   })
 }
+
+// Export our patched expect so users can import it and get the correct type and runtime matchers
+export { expect }

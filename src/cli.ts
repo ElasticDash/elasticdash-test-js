@@ -36,18 +36,34 @@ async function discoverTestFiles(patterns: string[], cwd: string): Promise<strin
 
 // --- Bootstrap ---
 async function bootstrap(): Promise<void> {
+
   registerMatchers()
+
 
   const cwd = process.cwd()
   const config = await loadConfig(cwd)
   const defaultPattern = config.testMatch ?? ['**/*.ai.test.ts', '**/*.ai.test.js']
+
+  // Read version from package.json
+  // Use require for CJS compatibility, fallback to import if needed
+  // This path is relative to the compiled dist directory
+  let version = 'unknown'
+  try {
+    // @ts-ignore
+    version = (await import(pathToFileURL(path.join(cwd, 'package.json')).href, { assert: { type: 'json' } })).default.version
+  } catch (e) {
+    try {
+      version = require(path.join(cwd, 'package.json')).version
+    } catch {}
+  }
+
 
   const program = new Command()
 
   program
     .name('elasticdash')
     .description('AI-native test runner for ElasticDash workflow testing')
-    .version('0.1.0')
+    .version(version)
 
   // elasticdash test [dir]
   program
