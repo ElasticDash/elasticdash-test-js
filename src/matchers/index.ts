@@ -6,6 +6,63 @@ interface LLMStepConfig {
   contains?: string
 }
 
+/**
+ * Type guard: returns true only if `value` looks like a TraceHandle.
+ * Used to produce a clear error message when a non-trace value (e.g. a plain
+ * string) is passed to a trace-aware matcher.
+ */
+function isTraceHandle(value: unknown): value is TraceHandle {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof (value as TraceHandle).getLLMSteps === 'function' &&
+    typeof (value as TraceHandle).getToolCalls === 'function'
+  )
+}
+
+// Helper: Call OpenAI GPT-4.1 to judge semantic match
+async function llmJudgeSemanticMatch(traceOutput: string, expected: string): Promise<boolean> {
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) throw new Error('OPENAI_API_KEY is not set in environment.')
+
+  const prompt = `
+You are an expert test judge. Given the following AI trace output and an expected semantic result, answer "YES" if the trace output semantically matches the expectation, otherwise answer "NO".
+
+Trace Output:
+${traceOutput}
+
+Expected:
+${expected}
+
+Answer only "YES" or "NO".
+  `.trim()
+
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'gpt-4-1106-preview',
+      messages: [
+        { role: 'system', content: 'You are an expert test judge.' },
+        { role: 'user', content: prompt },
+      ],
+      max_tokens: 5,
+      temperature: 0,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`)
+  }
+
+  const data: any = await response.json()
+  const content = data.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
+  return content.startsWith('YES')
+}
+
 // Augment the `expect` package so TypeScript knows about custom matchers
 declare module 'expect' {
   interface Matchers<R> {
@@ -21,11 +78,14 @@ declare module 'expect' {
  */
 export function registerMatchers(): void {
   expect.extend({
-    /**
-     * Assert the trace contains at least one LLM step matching the config.
-     * Usage: expect(trace).toHaveLLMStep({ model: "gpt-4", contains: "order confirmed" })
-     */
     toHaveLLMStep(trace: TraceHandle, config: LLMStepConfig = {}) {
+      if (!isTraceHandle(trace)) {
+        return {
+          pass: false,
+          message: () =>
+            `Expected a TraceHandle (ctx.trace) but received ${typeof trace}.\nUse: expect(ctx.trace).toHaveLLMStep(...)`,
+        }
+      }
       const steps = trace.getLLMSteps()
 
       const matching = steps.filter((step: LLMStep) => {
@@ -57,11 +117,14 @@ export function registerMatchers(): void {
       }
     },
 
-    /**
-     * Assert the trace contains a tool call with the given name.
-     * Usage: expect(trace).toCallTool("chargeCard")
-     */
     toCallTool(trace: TraceHandle, toolName: string) {
+      if (!isTraceHandle(trace)) {
+        return {
+          pass: false,
+          message: () =>
+            `Expected a TraceHandle (ctx.trace) but received ${typeof trace}.\nUse: expect(ctx.trace).toCallTool(...)`,
+        }
+      }
       const calls = trace.getToolCalls()
       const pass = calls.some((c) => c.name === toolName)
 
@@ -78,29 +141,37 @@ export function registerMatchers(): void {
       }
     },
 
-    /**
-     * Assert the trace output semantically matches an expected string.
-     * For MP: simple substring/case-insensitive match.
-     * Later: can swap in embedding-based similarity.
-     * Usage: expect(trace).toMatchSemanticOutput("order confirmed")
-     */
-    toMatchSemanticOutput(trace: TraceHandle, expected: string) {
+    async toMatchSemanticOutput(trace: TraceHandle, expected: string) {
+      if (!isTraceHandle(trace)) {
+        return {
+          pass: false,
+          message: () =>
+            `Expected a TraceHandle (ctx.trace) but received ${typeof trace}.\nUse: expect(ctx.trace).toMatchSemanticOutput(...)`,
+        }
+      }
       const steps = trace.getLLMSteps()
       const fullOutput = steps
         .map((s: LLMStep) => [s.completion, s.contains].filter(Boolean).join(' '))
         .join(' ')
-        .toLowerCase()
+        .trim()
 
-      const pass = fullOutput.includes(expected.toLowerCase())
-
-      return {
-        pass,
-        message: () => {
-          if (pass) {
-            return `Expected trace output NOT to semantically match "${expected}"`
-          }
-          return `Expected trace output to semantically match "${expected}", but got: "${fullOutput || '(empty)'}"`
-        },
+      try {
+        const pass = await llmJudgeSemanticMatch(fullOutput, expected)
+        return {
+          pass,
+          message: () => {
+            if (pass) {
+              return `Expected trace output NOT to semantically match "${expected}" (LLM judged YES)`
+            }
+            return `Expected trace output to semantically match "${expected}", but LLM judged NO. Trace output: "${fullOutput || '(empty)'}"`
+          },
+        }
+      } catch (err) {
+        return {
+          pass: false,
+          message: () =>
+            `LLM semantic match failed: ${(err as Error).message}`,
+        }
       }
     },
   })
