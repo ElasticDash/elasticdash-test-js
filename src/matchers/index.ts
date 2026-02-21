@@ -12,6 +12,14 @@ interface LLMStepConfig {
   maxTimes?: number        // match count must be <= this value
 }
 
+type SupportedProvider = 'openai' | 'claude' | 'gemini' | 'grok'
+
+interface SemanticMatchOptions {
+  provider?: SupportedProvider
+  model?: string
+  sdk?: unknown // optional user-supplied SDK instance
+}
+
 /**
  * Type guard: returns true only if `value` looks like a TraceHandle.
  * Used to produce a clear error message when a non-trace value (e.g. a plain
@@ -26,11 +34,14 @@ function isTraceHandle(value: unknown): value is TraceHandle {
   )
 }
 
-// Helper: Call OpenAI GPT-4.1 to judge semantic match
-async function llmJudgeSemanticMatch(traceOutput: string, expected: string): Promise<boolean> {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) throw new Error('OPENAI_API_KEY is not set in environment.')
-
+// Helper: Call an LLM (configurable provider/model/sdk) to judge semantic match
+async function llmJudgeSemanticMatch(
+  traceOutput: string,
+  expected: string,
+  options: SemanticMatchOptions = {}
+): Promise<boolean> {
+  const provider: SupportedProvider = options.provider ?? 'openai'
+  const sdk = options.sdk as any | undefined
   const prompt = `
 You are an expert test judge. Given the following AI trace output and an expected semantic result, answer "YES" if the trace output semantically matches the expectation, otherwise answer "NO".
 
@@ -43,30 +54,172 @@ ${expected}
 Answer only "YES" or "NO".
   `.trim()
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'gpt-4-1106-preview',
-      messages: [
-        { role: 'system', content: 'You are an expert test judge.' },
-        { role: 'user', content: prompt },
-      ],
-      max_tokens: 5,
-      temperature: 0,
-    }),
-  })
+  switch (provider) {
+    case 'openai': {
+      const resolvedModel = options.model ?? 'gpt-4.1'
+      if (sdk && sdk.chat?.completions?.create) {
+        const resp = await sdk.chat.completions.create({
+          model: resolvedModel,
+          messages: [
+            { role: 'system', content: 'You are an expert test judge.' },
+            { role: 'user', content: prompt },
+          ],
+          max_tokens: 8,
+          temperature: 0,
+        })
+        const content = resp?.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
+        return content.startsWith('YES')
+      }
 
-  if (!response.ok) {
-    throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`)
+      const apiKey = process.env.OPENAI_API_KEY
+      if (!apiKey) throw new Error('OPENAI_API_KEY is not set in environment.')
+
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: resolvedModel,
+          messages: [
+            { role: 'system', content: 'You are an expert test judge.' },
+            { role: 'user', content: prompt },
+          ],
+          max_tokens: 8,
+          temperature: 0,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`)
+      }
+      const data: any = await response.json()
+      const content = data.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
+      return content.startsWith('YES')
+    }
+
+    case 'claude': {
+      const resolvedModel = options.model ?? 'claude-3-opus-20240229'
+      if (sdk && sdk.messages?.create) {
+        const resp = await sdk.messages.create({
+          model: resolvedModel,
+          max_tokens: 32,
+          temperature: 0,
+          messages: [{ role: 'user', content: prompt }],
+        })
+        const content = resp?.content?.[0]?.text?.trim().toUpperCase() || ''
+        return content.startsWith('YES')
+      }
+
+      const apiKey = process.env.ANTHROPIC_API_KEY
+      if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set in environment.')
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: resolvedModel,
+          max_tokens: 32,
+          temperature: 0,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Claude API error: ${response.status} ${response.statusText}`)
+      }
+      const data: any = await response.json()
+      const content = data?.content?.[0]?.text?.trim().toUpperCase() || ''
+      return content.startsWith('YES')
+    }
+
+    case 'gemini': {
+      const resolvedModel = options.model ?? 'gemini-1.5-pro'
+      if (sdk && sdk.models?.generateContent) {
+        const resp = await sdk.models.generateContent({
+          model: resolvedModel,
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0, maxOutputTokens: 8 },
+        })
+        const content = resp?.response?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toUpperCase() || ''
+        return content.startsWith('YES')
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+      if (!apiKey) throw new Error('GEMINI_API_KEY (or GOOGLE_API_KEY) is not set in environment.')
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0, maxOutputTokens: 8 },
+          }),
+        }
+      )
+
+      if (!response.ok) {
+        throw new Error(`Gemini API error: ${response.status} ${response.statusText}`)
+      }
+      const data: any = await response.json()
+      const content = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toUpperCase() || ''
+      return content.startsWith('YES')
+    }
+
+    case 'grok': {
+      const resolvedModel = options.model ?? 'grok-beta'
+      if (sdk && sdk.chat?.completions?.create) {
+        const resp = await sdk.chat.completions.create({
+          model: resolvedModel,
+          messages: [
+            { role: 'system', content: 'You are an expert test judge.' },
+            { role: 'user', content: prompt },
+          ],
+          max_tokens: 8,
+          temperature: 0,
+        })
+        const content = resp?.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
+        return content.startsWith('YES')
+      }
+
+      const apiKey = process.env.GROK_API_KEY
+      if (!apiKey) throw new Error('GROK_API_KEY is not set in environment.')
+
+      const response = await fetch('https://api.x.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: resolvedModel,
+          messages: [
+            { role: 'system', content: 'You are an expert test judge.' },
+            { role: 'user', content: prompt },
+          ],
+          max_tokens: 8,
+          temperature: 0,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Grok API error: ${response.status} ${response.statusText}`)
+      }
+      const data: any = await response.json()
+      const content = data.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
+      return content.startsWith('YES')
+    }
+
+    default:
+      throw new Error(`Unsupported provider: ${provider}`)
   }
-
-  const data: any = await response.json()
-  const content = data.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
-  return content.startsWith('YES')
 }
 
 // Augment the `expect` package so TypeScript knows about custom matchers
@@ -74,7 +227,7 @@ declare module 'expect' {
   interface Matchers<R> {
     toHaveLLMStep(config?: LLMStepConfig): R
     toCallTool(toolName: string): R
-    toMatchSemanticOutput(expected: string): R
+    toMatchSemanticOutput(expected: string, options?: SemanticMatchOptions): R
   }
 }
 
@@ -166,7 +319,7 @@ export function registerMatchers(): void {
       }
     },
 
-    async toMatchSemanticOutput(trace: TraceHandle, expected: string) {
+    async toMatchSemanticOutput(trace: TraceHandle, expected: string, options?: SemanticMatchOptions) {
       if (!isTraceHandle(trace)) {
         return {
           pass: false,
@@ -181,7 +334,7 @@ export function registerMatchers(): void {
         .trim()
 
       try {
-        const pass = await llmJudgeSemanticMatch(fullOutput, expected)
+        const pass = await llmJudgeSemanticMatch(fullOutput, expected, options)
         return {
           pass,
           message: () => {
