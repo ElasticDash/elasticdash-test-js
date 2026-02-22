@@ -160,9 +160,18 @@ expect(ctx.trace).toMatchSemanticOutput('attack stat', {
 
 // Minimal, using default OpenAI model
 expect(ctx.trace).toMatchSemanticOutput('order confirmed')
+
+// OpenAI-compatible endpoint (e.g., Moonshot/Kimi) via baseURL + apiKey
+expect(ctx.trace).toMatchSemanticOutput('order confirmed', {
+  provider: 'openai',
+  model: 'kimi-k2-turbo-preview',
+  apiKey: process.env.KIMI_API_KEY,
+  baseURL: 'https://api.moonshot.ai/v1',
+})
 ```
 
 Environment keys by provider: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `GROK_API_KEY`.
+For OpenAI-compatible endpoints, pass `apiKey`/`baseURL` in options or set an appropriate env var used by your SDK.
 
 #### `toEvaluateOutputMetric(config)`
 
@@ -196,7 +205,7 @@ Options:
 - `target`: `'result'` (default) or `'prompt'`. Mutually exclusive; evaluates that text only.
 - `index` / `nth`: pick which LLM step to score (0-based or 1-based). Defaults to the last LLM step.
 - `condition`: one of `greaterThan`, `lessThan`, `atLeast`, `atMost`, `equals`; default is `{ atLeast: 0.7 }`. Fails if the score is outside 0.0–1.0 or cannot be parsed.
-- `provider` / `model` / `sdk`: same shape as `toMatchSemanticOutput` (supports OpenAI, Claude, Gemini, Grok). Requires corresponding API key if no SDK is supplied.
+- `provider` / `model` / `sdk` / `apiKey` / `baseURL`: same shape as `toMatchSemanticOutput` (supports OpenAI, Claude, Gemini, Grok, and OpenAI-compatible via `baseURL`). Requires corresponding API key if no SDK is supplied.
 
 #### `toHaveCustomStep(config?)`
 

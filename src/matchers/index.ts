@@ -42,6 +42,8 @@ interface SemanticMatchOptions {
   provider?: SupportedProvider
   model?: string
   sdk?: unknown // optional user-supplied SDK instance
+  apiKey?: string // optional API key override (useful for OpenAI-compatible endpoints)
+  baseURL?: string // optional base URL override for OpenAI-compatible APIs
 }
 
 type EvaluationTarget = 'prompt' | 'result'
@@ -63,6 +65,8 @@ interface EvaluateOutputMetricConfig {
   provider?: SupportedProvider
   model?: string
   sdk?: unknown                   // optional SDK instance
+  apiKey?: string                 // optional API key override (useful for OpenAI-compatible endpoints)
+  baseURL?: string                // optional base URL override for OpenAI-compatible APIs
 }
 
 /**
@@ -113,10 +117,11 @@ async function callProviderLLM(
         return resp?.choices?.[0]?.message?.content?.trim() ?? ''
       }
 
-      const apiKey = process.env.OPENAI_API_KEY
-      if (!apiKey) throw new Error('OPENAI_API_KEY is not set in environment.')
+      const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY
+      if (!apiKey) throw new Error('Provide apiKey or set OPENAI_API_KEY for OpenAI-compatible endpoint.')
 
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      const baseURL = (options.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '')
+      const response = await fetch(`${baseURL}/chat/completions`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -521,7 +526,7 @@ ${targetText}
       try {
         const raw = await callProviderLLM(
           evalPrompt,
-          { provider: config.provider, model: config.model, sdk: config.sdk },
+          { provider: config.provider, model: config.model, sdk: config.sdk, apiKey: config.apiKey, baseURL: config.baseURL },
           'You are an evaluation assistant. Return only a number between 0 and 1.',
           16,
           0

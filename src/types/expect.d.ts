@@ -42,6 +42,8 @@ interface SemanticMatchOptions {
   provider?: SupportedProvider
   model?: string
   sdk?: unknown // optional user-supplied SDK instance
+  apiKey?: string // optional API key override (useful for OpenAI-compatible endpoints)
+  baseURL?: string // optional base URL override for OpenAI-compatible APIs
 }
 
 type EvaluationTarget = 'prompt' | 'result'
@@ -63,6 +65,8 @@ interface EvaluateOutputMetricConfig {
   provider?: SupportedProvider
   model?: string
   sdk?: unknown                   // optional SDK instance
+  apiKey?: string                 // optional API key override (useful for OpenAI-compatible endpoints)
+  baseURL?: string                // optional base URL override for OpenAI-compatible APIs
 }
 
 declare module 'expect' {
