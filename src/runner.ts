@@ -52,6 +52,15 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
   const registry = getRegistry()
   const results: TestResult[] = []
 
+  // Shared unhandled error trap for this file's test run
+  let currentTestName: string | null = null
+  let pendingUnhandled: Error | undefined
+  const onUnhandled = (reason: unknown) => {
+    if (!pendingUnhandled) pendingUnhandled = reason instanceof Error ? reason : new Error(String(reason))
+  }
+  process.on('unhandledRejection', onUnhandled)
+  process.on('uncaughtException', onUnhandled)
+
   // 3. Run beforeAll hooks
   for (const hook of registry.beforeAllHooks) {
     await hook()
@@ -70,6 +79,10 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
     let passed = false
     let error: Error | undefined
 
+    // Reset per-test unhandled capture and mark current test name
+    pendingUnhandled = undefined
+    currentTestName = entry.name
+
     setCurrentTrace(context.trace)
     try {
       await entry.fn(context)
@@ -78,6 +91,11 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
       error = err instanceof Error ? err : new Error(String(err))
     } finally {
       setCurrentTrace(undefined)
+      if (!error && pendingUnhandled) {
+        error = pendingUnhandled
+        passed = false
+      }
+      currentTestName = null
     }
 
     const durationMs = Date.now() - startTime
@@ -100,6 +118,10 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
   for (const hook of registry.afterAllHooks) {
     await hook()
   }
+
+  // Cleanup shared handlers
+  process.off('unhandledRejection', onUnhandled)
+  process.off('uncaughtException', onUnhandled)
 
   return { file, results }
 }
