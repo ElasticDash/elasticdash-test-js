@@ -13,6 +13,10 @@ This guide shows how to write effective AI workflow tests with `elasticdash-test
 - Matchers live on `expect` (already registered by `test-setup`).
 - Files end with `.ai.test.ts` and use the global `aiTest(name, fn)`.
 
+## Hooks
+- `beforeAll(fn)` / `afterAll(fn)`: run once per file before/after all tests.
+- `beforeEach(fn)` / `afterEach(fn)`: run before/after every test in the file. `afterEach` still runs when the test fails.
+
 ## Useful matchers (quick reference)
 - `toHaveLLMStep(config)`: Assert LLM calls match model/provider/prompt/output filters.
 - `toCallTool(name)`: Assert a tool call occurred.

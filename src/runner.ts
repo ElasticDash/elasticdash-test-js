@@ -85,11 +85,26 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
 
     setCurrentTrace(context.trace)
     try {
+      for (const hook of registry.beforeEachHooks) {
+        await hook()
+      }
+
       await entry.fn(context)
       passed = true
     } catch (err) {
       error = err instanceof Error ? err : new Error(String(err))
     } finally {
+      try {
+        for (const hook of registry.afterEachHooks) {
+          await hook()
+        }
+      } catch (afterErr) {
+        if (!error) {
+          error = afterErr instanceof Error ? afterErr : new Error(String(afterErr))
+          passed = false
+        }
+      }
+
       setCurrentTrace(undefined)
       if (!error && pendingUnhandled) {
         error = pendingUnhandled

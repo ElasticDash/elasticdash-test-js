@@ -1,5 +1,5 @@
 // Public API surface for programmatic use
-export { aiTest, beforeAll, afterAll, getRegistry, clearRegistry } from './core/registry.js'
+export { aiTest, beforeAll, afterAll, beforeEach, afterEach, getRegistry, clearRegistry } from './core/registry.js'
 export { createTraceHandle, startTraceSession, setCurrentTrace, getCurrentTrace } from './trace-adapter/context.js'
 export { registerMatchers } from './matchers/index.js'
 export { expect } from './matchers/index.js'

@@ -71,6 +71,8 @@ After importing `test-setup`, these are available globally — no imports needed
 |---|---|
 | `aiTest(name, fn)` | Register a test |
 | `beforeAll(fn)` | Run once before all tests in the file |
+| `beforeEach(fn)` | Run before every test in the file |
+| `afterEach(fn)` | Run after every test in the file (runs even if the test fails) |
 | `afterAll(fn)` | Run once after all tests in the file |
 
 ### Test context

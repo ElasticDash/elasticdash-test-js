@@ -11,6 +11,8 @@ export interface Registry {
   tests: TestEntry[]
   beforeAllHooks: Array<() => Promise<void> | void>
   afterAllHooks: Array<() => Promise<void> | void>
+  beforeEachHooks: Array<() => Promise<void> | void>
+  afterEachHooks: Array<() => Promise<void> | void>
 }
 
 const REGISTRY_KEY = '__elasticdash_registry__'
@@ -27,6 +29,8 @@ function createEmptyRegistry(): Registry {
     tests: [],
     beforeAllHooks: [],
     afterAllHooks: [],
+    beforeEachHooks: [],
+    afterEachHooks: [],
   }
 }
 
@@ -57,6 +61,16 @@ export function afterAll(fn: () => Promise<void> | void): void {
   registry.afterAllHooks.push(fn)
 }
 
+export function beforeEach(fn: () => Promise<void> | void): void {
+  const registry = getGlobalRegistry()
+  registry.beforeEachHooks.push(fn)
+}
+
+export function afterEach(fn: () => Promise<void> | void): void {
+  const registry = getGlobalRegistry()
+  registry.afterEachHooks.push(fn)
+}
+
 // Expose globally so test files can use without importing
 declare global {
   // eslint-disable-next-line no-var
@@ -65,8 +79,14 @@ declare global {
   var beforeAll: (fn: () => Promise<void> | void) => void
   // eslint-disable-next-line no-var
   var afterAll: (fn: () => Promise<void> | void) => void
+  // eslint-disable-next-line no-var
+  var beforeEach: (fn: () => Promise<void> | void) => void
+  // eslint-disable-next-line no-var
+  var afterEach: (fn: () => Promise<void> | void) => void
 }
 
 globalThis.aiTest = aiTest
 globalThis.beforeAll = beforeAll
 globalThis.afterAll = afterAll
+globalThis.beforeEach = beforeEach
+globalThis.afterEach = afterEach
