@@ -4,6 +4,38 @@
 
 This repository contains the source code for the `elasticdash-test` JavaScript/TypeScript SDK and test runner. The SDK provides utilities for AI-native workflow testing, including custom Jest/Expect matchers, trace recording, and integration with LLM and tool call workflows. It is designed to help developers write, run, and validate tests for AI-driven applications and workflows.
 
+## Repository Structure
+
+```
+elasticdash-test-js/
+  CLAUDE.md
+  README.md
+  LICENSE
+  elasticdash.config.ts
+  package.json
+  tsconfig.json
+  .claude/                # assistant metadata
+  .temp/                  # working artifacts (e.g., plan.md)
+  dist/                   # build output
+  docs/
+    test-writing-guidelines.md
+  examples/
+    simple.ai.test.ts
+    tsconfig.json
+  src/
+    browser-ui.ts
+    cli.ts
+    core/
+    index.ts
+    interceptors/
+    matchers/
+    reporter.ts
+    runner.ts
+    test-setup.ts
+    trace-adapter/
+    types/
+```
+
 ## Claude Code Contribution Policy
 
 To ensure safe and maintainable contributions from Claude (or any AI assistant), the following workflow **must** be followed for any code modification or addition:
