@@ -101,7 +101,7 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
     const durationMs = Date.now() - startTime
 
     if (hooks.onTestFinish) {
-      await hooks.onTestFinish(entry.name, passed, durationMs)
+      await hooks.onTestFinish(entry.name, passed, durationMs, error)
     }
 
     if (hooks.onTraceComplete) {

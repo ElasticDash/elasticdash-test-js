@@ -68,7 +68,7 @@ export function getCurrentTrace(): TraceHandle | undefined {
 /** Extension points for runner hooks (scaffold for future backend integration) */
 export interface RunnerHooks {
   onTestStart?(name: string): void | Promise<void>
-  onTestFinish?(name: string, passed: boolean, durationMs: number): void | Promise<void>
+  onTestFinish?(name: string, passed: boolean, durationMs: number, error?: Error): void | Promise<void>
   onTraceComplete?(name: string, trace: TraceHandle): void | Promise<void>
 }
 
