@@ -61,6 +61,8 @@ Duration: 3.4s
 
 ## Writing Tests
 
+See the full guide in [docs/test-writing-guidelines.md](docs/test-writing-guidelines.md).
+
 ### Globals
 
 After importing `test-setup`, these are available globally — no imports needed:
