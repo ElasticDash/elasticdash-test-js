@@ -1,5 +1,6 @@
 export interface LLMStep {
   model: string
+  provider?: string   // 'openai' | 'gemini' | 'grok' | undefined
   prompt?: string
   completion?: string
   contains?: string
@@ -11,8 +12,20 @@ export interface ToolCall {
   result?: unknown
 }
 
+export type CustomStepKind = 'rag' | 'code' | 'fixed' | 'custom'
+
+export interface CustomStep {
+  kind: CustomStepKind
+  name?: string
+  tags?: string[]
+  payload?: unknown
+  result?: unknown
+  metadata?: Record<string, unknown>
+  contains?: string
+}
+
 export interface TraceStep {
-  type: 'llm' | 'tool' | 'generic'
+  type: 'llm' | 'tool' | 'custom'
   timestamp: number
   durationMs: number
   data: Record<string, unknown>
@@ -25,20 +38,37 @@ export interface TraceHandle {
   getLLMSteps(): LLMStep[]
   /** Only tool-call steps */
   getToolCalls(): ToolCall[]
+  /** Only custom steps (RAG, code, fixed, etc.) */
+  getCustomSteps(): CustomStep[]
   /** Record an LLM step (used by stubs / real adapter) */
   recordLLMStep(step: LLMStep): void
   /** Record a tool call (used by stubs / real adapter) */
   recordToolCall(call: ToolCall): void
+  /** Record a custom step (e.g., RAG, code) */
+  recordCustomStep(step: CustomStep): void
 }
 
 export interface AITestContext {
   trace: TraceHandle
 }
 
+// --- AsyncLocalStorage-backed current trace (parallel-safe) ---
+import { AsyncLocalStorage } from 'node:async_hooks'
+
+const traceAls = new AsyncLocalStorage<TraceHandle | undefined>()
+
+export function setCurrentTrace(trace: TraceHandle | undefined): void {
+  traceAls.enterWith(trace)
+}
+
+export function getCurrentTrace(): TraceHandle | undefined {
+  return traceAls.getStore()
+}
+
 /** Extension points for runner hooks (scaffold for future backend integration) */
 export interface RunnerHooks {
   onTestStart?(name: string): void | Promise<void>
-  onTestFinish?(name: string, passed: boolean, durationMs: number): void | Promise<void>
+  onTestFinish?(name: string, passed: boolean, durationMs: number, error?: Error): void | Promise<void>
   onTraceComplete?(name: string, trace: TraceHandle): void | Promise<void>
 }
 
@@ -50,6 +80,7 @@ export function createTraceHandle(): TraceHandle {
   const steps: TraceStep[] = []
   const llmSteps: LLMStep[] = []
   const toolCalls: ToolCall[] = []
+  const customSteps: CustomStep[] = []
 
   return {
     getSteps() {
@@ -62,6 +93,10 @@ export function createTraceHandle(): TraceHandle {
 
     getToolCalls() {
       return toolCalls
+    },
+
+    getCustomSteps() {
+      return customSteps
     },
 
     recordLLMStep(step: LLMStep) {
@@ -81,6 +116,16 @@ export function createTraceHandle(): TraceHandle {
         timestamp: Date.now(),
         durationMs: 0,
         data: call as unknown as Record<string, unknown>,
+      })
+    },
+
+    recordCustomStep(step: CustomStep) {
+      customSteps.push(step)
+      steps.push({
+        type: 'custom',
+        timestamp: Date.now(),
+        durationMs: 0,
+        data: step as unknown as Record<string, unknown>,
       })
     },
   }

@@ -1,9 +1,10 @@
 // Public API surface for programmatic use
-export { aiTest, beforeAll, afterAll, getRegistry, clearRegistry } from './core/registry.js'
-export { createTraceHandle, startTraceSession } from './trace-adapter/context.js'
+export { aiTest, beforeAll, afterAll, beforeEach, afterEach, getRegistry, clearRegistry } from './core/registry.js'
+export { createTraceHandle, startTraceSession, setCurrentTrace, getCurrentTrace } from './trace-adapter/context.js'
 export { registerMatchers } from './matchers/index.js'
 export { expect } from './matchers/index.js'
 export { runFiles } from './runner.js'
 export { reportResults } from './reporter.js'
+export { installAIInterceptor, uninstallAIInterceptor } from './interceptors/ai-interceptor.js'
 export type { TestResult, FileResult, RunnerOptions } from './runner.js'
-export type { AITestContext, TraceHandle, LLMStep, ToolCall, TraceStep, RunnerHooks } from './trace-adapter/context.js'
+export type { AITestContext, TraceHandle, LLMStep, ToolCall, CustomStep, TraceStep, RunnerHooks } from './trace-adapter/context.js'

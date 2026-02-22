@@ -3,7 +3,8 @@
 An AI-native test runner for ElasticDash workflow testing. Built for async AI pipelines — not a general-purpose test runner.
 
 - Trace-first: every test receives a `trace` context to record and assert on LLM calls and tool invocations
-- AI-specific matchers: `toHaveLLMStep`, `toCallTool`, `toMatchSemanticOutput`
+- Automatic fetch interception for OpenAI, Gemini, and Grok — no manual instrumentation required
+- AI-specific matchers: `toHaveLLMStep`, `toCallTool`, `toMatchSemanticOutput`, `toHaveCustomStep`, `toHavePromptWhere`, `toEvaluateOutputMetric`
 - Sequential execution, no parallelism overhead
 - No Jest dependency
 
@@ -60,6 +61,8 @@ Duration: 3.4s
 
 ## Writing Tests
 
+See the full guide in [docs/test-writing-guidelines.md](docs/test-writing-guidelines.md).
+
 ### Globals
 
 After importing `test-setup`, these are available globally — no imports needed:
@@ -68,6 +71,8 @@ After importing `test-setup`, these are available globally — no imports needed
 |---|---|
 | `aiTest(name, fn)` | Register a test |
 | `beforeAll(fn)` | Run once before all tests in the file |
+| `beforeEach(fn)` | Run before every test in the file |
+| `afterEach(fn)` | Run after every test in the file (runs even if the test fails) |
 | `afterAll(fn)` | Run once after all tests in the file |
 
 ### Test context
@@ -82,7 +87,9 @@ aiTest('my test', async (ctx) => {
 
 ### Recording trace data
 
-Your AI workflow code should call these on `ctx.trace` to make assertions possible:
+**Automatic interception (recommended):** When your workflow code makes real API calls to OpenAI, Gemini, or Grok, the runner intercepts them automatically and records the LLM step — no changes to your workflow code needed. See [Automatic AI Interception](#automatic-ai-interception) below.
+
+**Manual recording:** Use this for providers not covered by the interceptor, when testing against stubs/mocks, or to capture RAG / code / fixed steps:
 
 ```ts
 ctx.trace.recordLLMStep({
@@ -95,19 +102,46 @@ ctx.trace.recordToolCall({
   name: 'chargeCard',
   args: { amount: 99.99 },
 })
+
+// Record custom workflow steps (RAG fetches, code/fixed steps, etc.)
+ctx.trace.recordCustomStep({
+  kind: 'rag',              // 'rag' | 'code' | 'fixed' | 'custom'
+  name: 'pokemon-search',
+  tags: ['sort:asc', 'source:db'],
+  payload: { query: 'pikachu attack' },
+  result: { ids: [25] },
+  metadata: { latencyMs: 120 },
+})
 ```
 
 ### Matchers
 
 #### `toHaveLLMStep(config?)`
 
-Assert the trace contains at least one LLM step matching the given config. All fields are optional.
+Assert the trace contains at least one LLM step matching the given config. All fields are optional and combined with AND logic.
 
 ```ts
 expect(ctx.trace).toHaveLLMStep({ model: 'gpt-4' })
-expect(ctx.trace).toHaveLLMStep({ contains: 'order confirmed' })
-expect(ctx.trace).toHaveLLMStep({ model: 'gpt-4', contains: 'order confirmed' })
+expect(ctx.trace).toHaveLLMStep({ contains: 'order confirmed' })       // searches prompt + completion
+expect(ctx.trace).toHaveLLMStep({ promptContains: 'order status' })    // searches prompt only
+expect(ctx.trace).toHaveLLMStep({ outputContains: 'order confirmed' }) // searches completion only
+expect(ctx.trace).toHaveLLMStep({ provider: 'openai' })
+expect(ctx.trace).toHaveLLMStep({ provider: 'openai', promptContains: 'order status' })
+expect(ctx.trace).toHaveLLMStep({ promptContains: 'retry', times: 3 })      // exactly 3 matching steps
+expect(ctx.trace).toHaveLLMStep({ provider: 'openai', minTimes: 2 })        // at least 2 matching steps
+expect(ctx.trace).toHaveLLMStep({ outputContains: 'error', maxTimes: 1 })   // at most 1 matching step
 ```
+
+| Field | Description |
+|---|---|
+| `model` | Exact model name match (e.g. `'gpt-4o'`) |
+| `contains` | Substring match across prompt + completion (case-insensitive) |
+| `promptContains` | Substring match in prompt only (case-insensitive) |
+| `outputContains` | Substring match in completion only (case-insensitive) |
+| `provider` | Provider name: `'openai'`, `'gemini'`, or `'grok'` |
+| `times` | Exact match count (fails unless exactly this many steps match) |
+| `minTimes` | Minimum match count (steps matching must be ≥ this value) |
+| `maxTimes` | Maximum match count (steps matching must be ≤ this value) |
 
 #### `toCallTool(toolName)`
 
@@ -117,13 +151,173 @@ Assert the trace contains a tool call with the given name.
 expect(ctx.trace).toCallTool('chargeCard')
 ```
 
-#### `toMatchSemanticOutput(expected)`
+#### `toMatchSemanticOutput(expected, options?)`
 
-Assert the combined LLM output contains the expected string (case-insensitive substring match — designed for a future embedding-based similarity upgrade).
+LLM-judged semantic match of combined LLM output vs. the expected string. Defaults to OpenAI GPT-4.1 with `OPENAI_API_KEY`. Optional options:
 
 ```ts
+expect(ctx.trace).toMatchSemanticOutput('attack stat', {
+  provider: 'claude',               // 'openai' (default) | 'claude' | 'gemini' | 'grok'
+  model: 'claude-3-opus-20240229',  // overrides default model for the provider
+  sdk: myClaudeClient,              // optional SDK instance (uses its chat/messages API)
+})
+
+// Minimal, using default OpenAI model
 expect(ctx.trace).toMatchSemanticOutput('order confirmed')
+
+// OpenAI-compatible endpoint (e.g., Moonshot/Kimi) via baseURL + apiKey
+expect(ctx.trace).toMatchSemanticOutput('order confirmed', {
+  provider: 'openai',
+  model: 'kimi-k2-turbo-preview',
+  apiKey: process.env.KIMI_API_KEY,
+  baseURL: 'https://api.moonshot.ai/v1',
+})
 ```
+
+Environment keys by provider: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `GROK_API_KEY`.
+For OpenAI-compatible endpoints, pass `apiKey`/`baseURL` in options or set an appropriate env var used by your SDK.
+
+#### `toEvaluateOutputMetric(config)`
+
+Evaluate one LLM step’s prompt or result using an LLM and assert a numeric metric condition in the range 0.0–1.0. Defaults: target=`result`, condition=`atLeast 0.7`, provider=`openai`, model=`gpt-4.1`.
+
+```ts
+// Evaluate the last LLM result with your own prompt; default condition atLeast 0.7
+expect(ctx.trace).toEvaluateOutputMetric({
+  evaluationPrompt: 'Rate how well this answers the user question.',
+})
+
+// Check a specific step (3rd LLM prompt), target the prompt text, require >= 0.8 via Claude
+expect(ctx.trace).toEvaluateOutputMetric({
+  evaluationPrompt: 'Score coherence of this prompt between 0 and 1.',
+  target: 'prompt',
+  nth: 3,
+  condition: { atLeast: 0.8 },
+  provider: 'claude',
+  model: 'claude-3-opus-20240229',
+})
+
+// Custom comparator: score must be < 0.3
+expect(ctx.trace).toEvaluateOutputMetric({
+  evaluationPrompt: 'Rate hallucination risk (0=none, 1=high).',
+  condition: { lessThan: 0.3 },
+})
+```
+
+Options:
+- `evaluationPrompt` (required): your scoring instructions; model is asked to return only a number between 0 and 1.
+- `target`: `'result'` (default) or `'prompt'`. Mutually exclusive; evaluates that text only.
+- `index` / `nth`: pick which LLM step to score (0-based or 1-based). Defaults to the last LLM step.
+- `condition`: one of `greaterThan`, `lessThan`, `atLeast`, `atMost`, `equals`; default is `{ atLeast: 0.7 }`. Fails if the score is outside 0.0–1.0 or cannot be parsed.
+- `provider` / `model` / `sdk` / `apiKey` / `baseURL`: same shape as `toMatchSemanticOutput` (supports OpenAI, Claude, Gemini, Grok, and OpenAI-compatible via `baseURL`). Requires corresponding API key if no SDK is supplied.
+
+#### `toHaveCustomStep(config?)`
+
+Assert a recorded custom step (RAG/code/fixed/custom) matches filters.
+
+```ts
+expect(ctx.trace).toHaveCustomStep({ kind: 'rag', name: 'pokemon-search' })
+expect(ctx.trace).toHaveCustomStep({ tag: 'sort:asc' })
+expect(ctx.trace).toHaveCustomStep({ contains: 'pikachu' })
+expect(ctx.trace).toHaveCustomStep({ resultContains: '25' })
+expect(ctx.trace).toHaveCustomStep({ kind: 'rag', minTimes: 1, maxTimes: 2 })
+```
+
+#### `toHavePromptWhere(config)`
+
+Filter prompts, then assert additional constraints. Example: “all prompts containing A must also contain B”.
+
+```ts
+// Prompts that contain "order" must also contain "confirmed"
+expect(ctx.trace).toHavePromptWhere({
+  filterContains: 'order',
+  requireContains: 'confirmed',
+})
+
+// Prompts containing "retry" must NOT contain "cancel"
+expect(ctx.trace).toHavePromptWhere({
+  filterContains: 'retry',
+  requireNotContains: 'cancel',
+})
+
+// And control counts on the filtered subset
+expect(ctx.trace).toHavePromptWhere({
+  filterContains: 'order',
+  requireContains: 'confirmed',
+  minTimes: 1,
+  maxTimes: 3,
+})
+
+// Check a specific prompt position (1-based nth or 0-based index)
+expect(ctx.trace).toHavePromptWhere({
+  filterContains: 'order',
+  requireContains: 'confirmed',
+  nth: 3, // the 3rd prompt among those containing "order"
+})
+```
+
+---
+
+## Automatic AI Interception
+
+The runner patches `globalThis.fetch` before tests run and automatically records LLM steps for calls to the following endpoints:
+
+| Provider | Endpoints intercepted |
+|---|---|
+| **OpenAI** | `api.openai.com/v1/chat/completions`, `/v1/completions` |
+| **Gemini** | `generativelanguage.googleapis.com/.../models/...:generateContent` |
+| **Grok** (xAI) | `api.x.ai/v1/chat/completions` |
+
+Each intercepted call records `model`, `provider`, `prompt`, and `completion` into `ctx.trace` automatically. Your workflow code needs no changes.
+
+```ts
+aiTest('user lookup flow', async (ctx) => {
+  // This makes a real OpenAI call — intercepted automatically
+  await myWorkflow.run('Find all active users')
+
+  // Works without any ctx.trace.recordLLMStep() in your workflow
+  expect(ctx.trace).toHaveLLMStep({ promptContains: 'Find all active users' })
+  expect(ctx.trace).toHaveLLMStep({ provider: 'openai' })
+})
+```
+
+**Streaming:** When `stream: true` is set on a request, the completion is recorded as `"(streamed)"` — the prompt and model are still captured.
+
+**Libraries using `https.request` directly** (older versions of some SDKs) are not covered by fetch interception. Use manual `ctx.trace.recordLLMStep()` for those.
+
+### Recording flow steps without passing `ctx.trace` (AsyncLocalStorage)
+
+The runner now sets a per-test `currentTrace` using Node’s `AsyncLocalStorage`, so your app code can record steps without threading `ctx.trace` through every function. This remains safe under parallel execution.
+
+```ts
+// In your test
+import { setCurrentTrace } from 'elasticdash-test'
+
+aiTest('flow test', async (ctx) => {
+  setCurrentTrace(ctx.trace)          // bind the trace to the current async context
+  await runFlowWithoutTraceArg()      // your existing code
+  // assertions
+  expect(ctx.trace).toHaveCustomStep({ kind: 'rag', name: 'pokemon-search' })
+})
+
+// In your app/flow code (called during the test)
+import { getCurrentTrace } from 'elasticdash-test'
+
+function runFlowWithoutTraceArg() {
+  const trace = getCurrentTrace()
+  trace?.recordCustomStep({
+    kind: 'rag',
+    name: 'pokemon-search',
+    payload: { query: 'pikachu attack' },
+    result: { ids: [25] },
+    tags: ['source:db', 'sort:asc'],
+  })
+}
+```
+
+Notes:
+- Works per async context; if you spawn detached work (child processes/independent workers), pass `trace` explicitly there.
+- Still compatible with manual DI: you can continue passing `ctx.trace` explicitly if you prefer.
 
 ---
 
@@ -182,6 +376,8 @@ src/
     context.ts           TraceHandle, AITestContext, RunnerHooks scaffold
   matchers/
     index.ts             Custom expect matchers
+  interceptors/
+    ai-interceptor.ts    Automatic fetch interceptor for OpenAI / Gemini / Grok
 ```
 
 ---
@@ -189,11 +385,15 @@ src/
 ## Programmatic API
 
 ```ts
-import { runFiles, reportResults, registerMatchers } from 'elasticdash-test'
+import { runFiles, reportResults, registerMatchers, installAIInterceptor, uninstallAIInterceptor } from 'elasticdash-test'
 
 registerMatchers()
+installAIInterceptor()   // patch globalThis.fetch for automatic LLM tracing
+
 const results = await runFiles(['./tests/flow.ai.test.ts'])
 reportResults(results)
+
+uninstallAIInterceptor() // restore original fetch when done
 ```
 
 ---

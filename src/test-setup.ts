@@ -1,6 +1,6 @@
 /**
  * Import this file in your AI test files to get:
- *   - aiTest / beforeAll / afterAll available as globals (TypeScript types + runtime)
+ *   - aiTest / beforeAll / afterAll / beforeEach / afterEach available as globals (TypeScript types + runtime)
  *   - Custom matcher types (toHaveLLMStep, toCallTool, toMatchSemanticOutput)
  *
  * The CLI registers matchers at startup, so this import is for TypeScript
