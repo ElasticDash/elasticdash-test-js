@@ -1,21 +1,55 @@
 import 'expect';
-import type { TraceHandle } from '../trace-adapter/context';
+import type { TraceHandle, CustomStep, CustomStepKind } from '../trace-adapter/context';
 
 interface LLMStepConfig {
   model?: string
   contains?: string        // searches prompt + completion
   promptContains?: string  // searches only in step.prompt
   outputContains?: string  // searches only in step.completion
-  provider?: string        // 'openai' | 'gemini' | 'grok'
+  provider?: string        // 'openai' | 'claude' | 'gemini' | 'grok'
   times?: number           // match count must equal exactly this value
   minTimes?: number        // match count must be >= this value
   maxTimes?: number        // match count must be <= this value
+}
+
+interface CustomStepConfig {
+  kind?: CustomStepKind
+  name?: string
+  tag?: string
+  contains?: string          // searches payload/result/metadata stringified
+  resultContains?: string    // searches result only
+  payloadContains?: string   // searches payload only
+  metadataContains?: string  // searches metadata only
+  times?: number
+  minTimes?: number
+  maxTimes?: number
+}
+
+interface PromptWhereConfig {
+  filterContains: string           // first filter: prompts that contain this substring
+  requireContains?: string         // then assert: filtered prompts must also contain this
+  requireNotContains?: string      // and must NOT contain this
+  times?: number                   // exact count of filtered prompts
+  minTimes?: number                // min count of filtered prompts
+  maxTimes?: number                // max count of filtered prompts
+  index?: number                   // optional 0-based index into filtered prompts to check specifically
+  nth?: number                     // optional 1-based alias for index
+}
+
+type SupportedProvider = 'openai' | 'claude' | 'gemini' | 'grok'
+
+interface SemanticMatchOptions {
+  provider?: SupportedProvider
+  model?: string
+  sdk?: unknown // optional user-supplied SDK instance
 }
 
 declare module 'expect' {
   interface Matchers<R> {
     toHaveLLMStep(config?: LLMStepConfig): R;
     toCallTool(toolName: string): R;
-    toMatchSemanticOutput(expected: string): R;
+    toMatchSemanticOutput(expected: string, options?: SemanticMatchOptions): R;
+    toHaveCustomStep(config?: CustomStepConfig): R;
+    toHavePromptWhere(config: PromptWhereConfig): R;
   }
 }

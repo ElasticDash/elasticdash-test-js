@@ -1,7 +1,6 @@
 import { clearRegistry, getRegistry } from './core/registry.js'
-import { startTraceSession } from './trace-adapter/context.js'
+import { startTraceSession, setCurrentTrace } from './trace-adapter/context.js'
 import type { RunnerHooks } from './trace-adapter/context.js'
-import { setCurrentTrace } from './interceptors/ai-interceptor.js'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 
@@ -61,6 +60,7 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
   // 4. Execute each test sequentially
   for (const entry of registry.tests) {
     const { context, finalise } = startTraceSession()
+    setCurrentTrace(context.trace)
 
     if (hooks.onTestStart) {
       await hooks.onTestStart(entry.name)
@@ -77,7 +77,7 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
     } catch (err) {
       error = err instanceof Error ? err : new Error(String(err))
     } finally {
-      setCurrentTrace(null)
+      setCurrentTrace(undefined)
     }
 
     const durationMs = Date.now() - startTime
@@ -91,6 +91,7 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
     }
 
     finalise()
+    setCurrentTrace(undefined)
 
     results.push({ name: entry.name, passed, durationMs, error })
   }

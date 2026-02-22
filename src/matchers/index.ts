@@ -1,5 +1,5 @@
 import { expect } from 'expect'
-import type { TraceHandle, LLMStep } from '../trace-adapter/context.js'
+import type { TraceHandle, LLMStep, CustomStep, CustomStepKind } from '../trace-adapter/context.js'
 
 interface LLMStepConfig {
   model?: string
@@ -10,6 +10,30 @@ interface LLMStepConfig {
   times?: number           // match count must equal exactly this value
   minTimes?: number        // match count must be >= this value
   maxTimes?: number        // match count must be <= this value
+}
+
+interface CustomStepConfig {
+  kind?: CustomStepKind
+  name?: string
+  tag?: string
+  contains?: string          // searches payload/result/metadata stringified
+  resultContains?: string    // searches result only
+  payloadContains?: string   // searches payload only
+  metadataContains?: string  // searches metadata only
+  times?: number
+  minTimes?: number
+  maxTimes?: number
+}
+
+interface PromptWhereConfig {
+  filterContains: string           // first filter: prompts that contain this substring
+  requireContains?: string         // then assert: filtered prompts must also contain this
+  requireNotContains?: string      // and must NOT contain this
+  times?: number                   // exact count of filtered prompts
+  minTimes?: number                // min count of filtered prompts
+  maxTimes?: number                // max count of filtered prompts
+  index?: number                   // optional 0-based index into filtered prompts to check specifically
+  nth?: number                     // optional 1-based alias for index
 }
 
 type SupportedProvider = 'openai' | 'claude' | 'gemini' | 'grok'
@@ -228,6 +252,12 @@ declare module 'expect' {
     toHaveLLMStep(config?: LLMStepConfig): R
     toCallTool(toolName: string): R
     toMatchSemanticOutput(expected: string, options?: SemanticMatchOptions): R
+    toHaveCustomStep(config?: CustomStepConfig): R
+    /**
+     * Filter prompts that contain `filterContains`, then assert additional requirements.
+     * Example: prompts containing "A" must also contain "B".
+     */
+    toHavePromptWhere(config: PromptWhereConfig): R
   }
 }
 
@@ -350,6 +380,170 @@ export function registerMatchers(): void {
           message: () =>
             `LLM semantic match failed: ${(err as Error).message}`,
         }
+      }
+    },
+
+    toHaveCustomStep(trace: TraceHandle, config: CustomStepConfig = {}) {
+      if (!isTraceHandle(trace) || typeof (trace as any).getCustomSteps !== 'function') {
+        return {
+          pass: false,
+          message: () =>
+            `Expected a TraceHandle (ctx.trace with getCustomSteps) but received ${typeof trace}.\nUse: expect(ctx.trace).toHaveCustomStep(...)`,
+        }
+      }
+
+      const steps = (trace as any).getCustomSteps() as CustomStep[]
+
+      const matchString = (val: unknown): string => {
+        if (val === undefined || val === null) return ''
+        if (typeof val === 'string') return val
+        try {
+          return JSON.stringify(val)
+        } catch {
+          return String(val)
+        }
+      }
+
+      const matching = steps.filter((step) => {
+        if (config.kind && step.kind !== config.kind) return false
+        if (config.name && step.name !== config.name) return false
+        if (config.tag && !(step.tags || []).includes(config.tag)) return false
+
+        const payloadStr = matchString(step.payload).toLowerCase()
+        const resultStr = matchString(step.result).toLowerCase()
+        const metaStr = matchString(step.metadata).toLowerCase()
+        const combined = [payloadStr, resultStr, metaStr].filter(Boolean).join(' ')
+
+        if (config.contains && !combined.includes(config.contains.toLowerCase())) return false
+        if (config.payloadContains && !payloadStr.includes(config.payloadContains.toLowerCase())) return false
+        if (config.resultContains && !resultStr.includes(config.resultContains.toLowerCase())) return false
+        if (config.metadataContains && !metaStr.includes(config.metadataContains.toLowerCase())) return false
+
+        return true
+      })
+
+      const count = matching.length
+      let pass: boolean
+      if (config.times !== undefined) {
+        pass = count === config.times
+      } else if (config.minTimes !== undefined || config.maxTimes !== undefined) {
+        const min = config.minTimes ?? 0
+        const max = config.maxTimes ?? Infinity
+        pass = count >= min && count <= max
+      } else {
+        pass = count > 0
+      }
+
+      return {
+        pass,
+        message: () => {
+          if (pass) {
+            return `Expected trace NOT to have custom step matching ${JSON.stringify(config)}`
+          }
+          const stepSummary =
+            steps.length === 0
+              ? 'no custom steps were recorded'
+              : `${count} matching step(s) found; recorded custom steps: ${JSON.stringify(steps)}`
+          return `Expected trace to have custom step matching ${JSON.stringify(config)}, but ${stepSummary}`
+        },
+      }
+    },
+
+    toHavePromptWhere(trace: TraceHandle, config: PromptWhereConfig) {
+      if (!isTraceHandle(trace)) {
+        return {
+          pass: false,
+          message: () =>
+            `Expected a TraceHandle (ctx.trace) but received ${typeof trace}.\nUse: expect(ctx.trace).toHavePromptWhere(...)`,
+        }
+      }
+      if (!config || !config.filterContains) {
+        return {
+          pass: false,
+          message: () => 'toHavePromptWhere requires filterContains',
+        }
+      }
+
+      const filterNeedle = config.filterContains.toLowerCase()
+      const requireNeedle = config.requireContains?.toLowerCase()
+      const forbidNeedle = config.requireNotContains?.toLowerCase()
+
+      const prompts = trace.getLLMSteps().map((s) => s.prompt ?? '')
+
+      const filtered = prompts.filter((p) => p.toLowerCase().includes(filterNeedle))
+
+      // Optional positional check (index or nth)
+      const targetIdx = config.index ?? (config.nth !== undefined ? config.nth - 1 : undefined)
+
+      let checked: string[] = []
+      let count = 0
+      let pass = true
+
+      if (targetIdx !== undefined) {
+        if (targetIdx < 0 || targetIdx >= filtered.length) {
+          return {
+            pass: false,
+            message: () =>
+              `Filtered prompts length ${filtered.length}, but index/nth points to ${targetIdx}. Config: ${JSON.stringify(config)}`,
+          }
+        }
+        const p = filtered[targetIdx]
+        const lower = p.toLowerCase()
+        const okRequire = requireNeedle ? lower.includes(requireNeedle) : true
+        const okForbid = forbidNeedle ? !lower.includes(forbidNeedle) : true
+        pass = okRequire && okForbid
+        checked = okRequire && okForbid ? [p] : []
+        count = checked.length
+      } else {
+        checked = filtered.filter((p) => {
+          const lower = p.toLowerCase()
+          if (requireNeedle && !lower.includes(requireNeedle)) return false
+          if (forbidNeedle && lower.includes(forbidNeedle)) return false
+          return true
+        })
+
+        count = checked.length
+
+        if (config.times !== undefined) {
+          pass = count === config.times
+        } else {
+          const min = config.minTimes ?? 0
+          const max = config.maxTimes ?? Infinity
+          pass = count >= min && count <= max
+        }
+
+        // Also ensure that if requireContains is set, no filtered prompt violates it
+        if (requireNeedle) {
+          const violating = filtered.filter((p) => !p.toLowerCase().includes(requireNeedle))
+          if (violating.length > 0) pass = false
+        }
+        if (forbidNeedle) {
+          const violating = filtered.filter((p) => p.toLowerCase().includes(forbidNeedle))
+          if (violating.length > 0) pass = false
+        }
+      }
+
+      return {
+        pass,
+        message: () => {
+          if (pass) {
+            return `Expected prompts NOT to satisfy filter/require combo: ${JSON.stringify(config)}`
+          }
+          const base = [`Expected prompts filtered by "${config.filterContains}" to satisfy requirements`]
+          if (config.requireContains) base.push(`requireContains: "${config.requireContains}"`)
+          if (config.requireNotContains) base.push(`requireNotContains: "${config.requireNotContains}"`)
+          if (targetIdx !== undefined) {
+            base.push(`checked index: ${targetIdx}`, `filtered count: ${filtered.length}`)
+          } else {
+            base.push(`filtered count: ${filtered.length}, passing count: ${checked.length}`)
+            base.push(
+              config.times !== undefined
+                ? `expected exactly ${config.times}`
+                : `expected between ${config.minTimes ?? 0} and ${config.maxTimes ?? Infinity}`,
+            )
+          }
+          return base.filter(Boolean).join('; ')
+        },
       }
     },
   })

@@ -1,7 +1,4 @@
-import type { TraceHandle } from '../trace-adapter/context.js'
-
-// Module-level reference to the currently active trace (set by runner before each test)
-let currentTrace: TraceHandle | null = null
+import { getCurrentTrace } from '../trace-adapter/context.js'
 
 /** URL patterns for known AI providers */
 const AI_PATTERNS: Record<string, RegExp> = {
@@ -120,9 +117,10 @@ export function installAIInterceptor(): void {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as { url: string }).url
 
     const provider = detectProvider(url)
+    const traceAtCall = getCurrentTrace()
 
     // No match or no active trace: pass through unchanged
-    if (!provider || !currentTrace) {
+    if (!provider || !traceAtCall) {
       return originalFetch!(input, init)
     }
 
@@ -146,22 +144,17 @@ export function installAIInterceptor(): void {
     // Make the actual request
     const response = await originalFetch!(input, init)
 
-    // Capture the trace reference at call time (may be nulled after await)
-    const trace = currentTrace
-
-    if (trace) {
+    if (traceAtCall) {
       if (isStreaming) {
-        trace.recordLLMStep({ model, provider, prompt, completion: '(streamed)' })
+        traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed)' })
       } else {
-        // Clone to read response body without consuming the original
         try {
           const cloned = response.clone()
           const responseBody = await cloned.json() as Record<string, unknown>
           const completion = extractCompletion(provider, responseBody)
-          trace.recordLLMStep({ model, provider, prompt, completion })
+          traceAtCall.recordLLMStep({ model, provider, prompt, completion })
         } catch {
-          // If we can't parse the response, record with empty completion
-          trace.recordLLMStep({ model, provider, prompt, completion: '' })
+          traceAtCall.recordLLMStep({ model, provider, prompt, completion: '' })
         }
       }
     }
@@ -178,12 +171,4 @@ export function uninstallAIInterceptor(): void {
     globalThis.fetch = originalFetch
     originalFetch = null
   }
-}
-
-/**
- * Set the currently active trace. Called by the runner before each test starts.
- * Pass null to clear (called after each test finishes).
- */
-export function setCurrentTrace(trace: TraceHandle | null): void {
-  currentTrace = trace
 }
