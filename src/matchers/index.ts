@@ -6,7 +6,7 @@ interface LLMStepConfig {
   contains?: string        // searches prompt + completion
   promptContains?: string  // searches only in step.prompt
   outputContains?: string  // searches only in step.completion
-  provider?: string        // 'openai' | 'gemini' | 'grok'
+  provider?: string        // 'openai' | 'claude' | 'gemini' | 'grok'
   times?: number           // match count must equal exactly this value
   minTimes?: number        // match count must be >= this value
   maxTimes?: number        // match count must be <= this value
@@ -44,6 +44,27 @@ interface SemanticMatchOptions {
   sdk?: unknown // optional user-supplied SDK instance
 }
 
+type EvaluationTarget = 'prompt' | 'result'
+
+interface EvaluationCondition {
+  greaterThan?: number
+  lessThan?: number
+  atLeast?: number
+  atMost?: number
+  equals?: number
+}
+
+interface EvaluateOutputMetricConfig {
+  evaluationPrompt: string
+  target?: EvaluationTarget       // 'prompt' or 'result'; default 'result'
+  index?: number                  // 0-based index into LLM steps
+  nth?: number                    // 1-based alias for index
+  condition?: EvaluationCondition // optional; default atLeast 0.7
+  provider?: SupportedProvider
+  model?: string
+  sdk?: unknown                   // optional SDK instance
+}
+
 /**
  * Type guard: returns true only if `value` looks like a TraceHandle.
  * Used to produce a clear error message when a non-trace value (e.g. a plain
@@ -58,41 +79,38 @@ function isTraceHandle(value: unknown): value is TraceHandle {
   )
 }
 
-// Helper: Call an LLM (configurable provider/model/sdk) to judge semantic match
-async function llmJudgeSemanticMatch(
-  traceOutput: string,
-  expected: string,
-  options: SemanticMatchOptions = {}
-): Promise<boolean> {
+const defaultModels: Record<SupportedProvider, string> = {
+  openai: 'gpt-4.1',
+  claude: 'claude-3-opus-20240229',
+  gemini: 'gemini-1.5-pro',
+  grok: 'grok-beta',
+}
+
+// Helper: call an LLM provider (or SDK) and return the text content
+async function callProviderLLM(
+  prompt: string,
+  options: SemanticMatchOptions = {},
+  systemPrompt = 'You are an expert test judge.',
+  maxTokens = 32,
+  temperature = 0
+): Promise<string> {
   const provider: SupportedProvider = options.provider ?? 'openai'
   const sdk = options.sdk as any | undefined
-  const prompt = `
-You are an expert test judge. Given the following AI trace output and an expected semantic result, answer "YES" if the trace output semantically matches the expectation, otherwise answer "NO".
-
-Trace Output:
-${traceOutput}
-
-Expected:
-${expected}
-
-Answer only "YES" or "NO".
-  `.trim()
+  const resolvedModel = options.model ?? defaultModels[provider]
 
   switch (provider) {
     case 'openai': {
-      const resolvedModel = options.model ?? 'gpt-4.1'
       if (sdk && sdk.chat?.completions?.create) {
         const resp = await sdk.chat.completions.create({
           model: resolvedModel,
           messages: [
-            { role: 'system', content: 'You are an expert test judge.' },
+            { role: 'system', content: systemPrompt },
             { role: 'user', content: prompt },
           ],
-          max_tokens: 8,
-          temperature: 0,
+          max_tokens: maxTokens,
+          temperature,
         })
-        const content = resp?.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
-        return content.startsWith('YES')
+        return resp?.choices?.[0]?.message?.content?.trim() ?? ''
       }
 
       const apiKey = process.env.OPENAI_API_KEY
@@ -107,11 +125,11 @@ Answer only "YES" or "NO".
         body: JSON.stringify({
           model: resolvedModel,
           messages: [
-            { role: 'system', content: 'You are an expert test judge.' },
+            { role: 'system', content: systemPrompt },
             { role: 'user', content: prompt },
           ],
-          max_tokens: 8,
-          temperature: 0,
+          max_tokens: maxTokens,
+          temperature,
         }),
       })
 
@@ -119,21 +137,18 @@ Answer only "YES" or "NO".
         throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`)
       }
       const data: any = await response.json()
-      const content = data.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
-      return content.startsWith('YES')
+      return data.choices?.[0]?.message?.content?.trim() ?? ''
     }
 
     case 'claude': {
-      const resolvedModel = options.model ?? 'claude-3-opus-20240229'
       if (sdk && sdk.messages?.create) {
         const resp = await sdk.messages.create({
           model: resolvedModel,
-          max_tokens: 32,
-          temperature: 0,
-          messages: [{ role: 'user', content: prompt }],
+          max_tokens: maxTokens,
+          temperature,
+          messages: [{ role: 'user', content: `${systemPrompt}\n\n${prompt}` }],
         })
-        const content = resp?.content?.[0]?.text?.trim().toUpperCase() || ''
-        return content.startsWith('YES')
+        return resp?.content?.[0]?.text?.trim() ?? ''
       }
 
       const apiKey = process.env.ANTHROPIC_API_KEY
@@ -148,9 +163,9 @@ Answer only "YES" or "NO".
         },
         body: JSON.stringify({
           model: resolvedModel,
-          max_tokens: 32,
-          temperature: 0,
-          messages: [{ role: 'user', content: prompt }],
+          max_tokens: maxTokens,
+          temperature,
+          messages: [{ role: 'user', content: `${systemPrompt}\n\n${prompt}` }],
         }),
       })
 
@@ -158,20 +173,17 @@ Answer only "YES" or "NO".
         throw new Error(`Claude API error: ${response.status} ${response.statusText}`)
       }
       const data: any = await response.json()
-      const content = data?.content?.[0]?.text?.trim().toUpperCase() || ''
-      return content.startsWith('YES')
+      return data?.content?.[0]?.text?.trim() ?? ''
     }
 
     case 'gemini': {
-      const resolvedModel = options.model ?? 'gemini-1.5-pro'
       if (sdk && sdk.models?.generateContent) {
         const resp = await sdk.models.generateContent({
           model: resolvedModel,
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 8 },
+          contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${prompt}` }] }],
+          generationConfig: { temperature, maxOutputTokens: maxTokens },
         })
-        const content = resp?.response?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toUpperCase() || ''
-        return content.startsWith('YES')
+        return resp?.response?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? ''
       }
 
       const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
@@ -183,8 +195,8 @@ Answer only "YES" or "NO".
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0, maxOutputTokens: 8 },
+            contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${prompt}` }] }],
+            generationConfig: { temperature, maxOutputTokens: maxTokens },
           }),
         }
       )
@@ -193,24 +205,21 @@ Answer only "YES" or "NO".
         throw new Error(`Gemini API error: ${response.status} ${response.statusText}`)
       }
       const data: any = await response.json()
-      const content = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toUpperCase() || ''
-      return content.startsWith('YES')
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? ''
     }
 
     case 'grok': {
-      const resolvedModel = options.model ?? 'grok-beta'
       if (sdk && sdk.chat?.completions?.create) {
         const resp = await sdk.chat.completions.create({
           model: resolvedModel,
           messages: [
-            { role: 'system', content: 'You are an expert test judge.' },
+            { role: 'system', content: systemPrompt },
             { role: 'user', content: prompt },
           ],
-          max_tokens: 8,
-          temperature: 0,
+          max_tokens: maxTokens,
+          temperature,
         })
-        const content = resp?.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
-        return content.startsWith('YES')
+        return resp?.choices?.[0]?.message?.content?.trim() ?? ''
       }
 
       const apiKey = process.env.GROK_API_KEY
@@ -225,11 +234,11 @@ Answer only "YES" or "NO".
         body: JSON.stringify({
           model: resolvedModel,
           messages: [
-            { role: 'system', content: 'You are an expert test judge.' },
+            { role: 'system', content: systemPrompt },
             { role: 'user', content: prompt },
           ],
-          max_tokens: 8,
-          temperature: 0,
+          max_tokens: maxTokens,
+          temperature,
         }),
       })
 
@@ -237,12 +246,68 @@ Answer only "YES" or "NO".
         throw new Error(`Grok API error: ${response.status} ${response.statusText}`)
       }
       const data: any = await response.json()
-      const content = data.choices?.[0]?.message?.content?.trim().toUpperCase() || ''
-      return content.startsWith('YES')
+      return data.choices?.[0]?.message?.content?.trim() ?? ''
     }
 
     default:
       throw new Error(`Unsupported provider: ${provider}`)
+  }
+}
+
+// Helper: Call an LLM (configurable provider/model/sdk) to judge semantic match
+async function llmJudgeSemanticMatch(
+  traceOutput: string,
+  expected: string,
+  options: SemanticMatchOptions = {}
+): Promise<boolean> {
+  const prompt = `
+You are an expert test judge. Given the following AI trace output and an expected semantic result, answer "YES" if the trace output semantically matches the expectation, otherwise answer "NO".
+
+Trace Output:
+${traceOutput}
+
+Expected:
+${expected}
+
+Answer only "YES" or "NO".
+  `.trim()
+
+  const content = (await callProviderLLM(prompt, options, 'You are an expert test judge.', 8, 0)).trim().toUpperCase()
+  return content.startsWith('YES')
+}
+
+function parseFirstNumber(text: string): number | null {
+  const match = text.match(/-?\d+(?:\.\d+)?/)
+  if (!match) return null
+  const num = Number.parseFloat(match[0])
+  return Number.isFinite(num) ? num : null
+}
+
+function resolveCondition(config?: EvaluationCondition): { kind: keyof EvaluationCondition; value: number } {
+  const entries = Object.entries(config || {}).filter(([, v]) => typeof v === 'number' && Number.isFinite(v)) as Array<
+    [keyof EvaluationCondition, number]
+  >
+  if (entries.length === 0) return { kind: 'atLeast', value: 0.7 }
+  if (entries.length > 1) {
+    throw new Error('Provide only one metric condition (greaterThan, lessThan, atLeast, atMost, equals).')
+  }
+  return { kind: entries[0][0], value: entries[0][1] }
+}
+
+function checkCondition(score: number, condition: { kind: keyof EvaluationCondition; value: number }): boolean {
+  switch (condition.kind) {
+    case 'greaterThan':
+      return score > condition.value
+    case 'lessThan':
+      return score < condition.value
+    case 'atLeast':
+      return score >= condition.value
+    case 'atMost':
+      return score <= condition.value
+    case 'equals':
+      return score === condition.value
+    default:
+      return false
   }
 }
 
@@ -258,6 +323,10 @@ declare module 'expect' {
      * Example: prompts containing "A" must also contain "B".
      */
     toHavePromptWhere(config: PromptWhereConfig): R
+    /**
+     * Evaluate a specific LLM step's prompt or result via an LLM and assert a numeric metric condition (0.0–1.0).
+     */
+    toEvaluateOutputMetric(config: EvaluateOutputMetricConfig): Promise<R>
   }
 }
 
@@ -379,6 +448,112 @@ export function registerMatchers(): void {
           pass: false,
           message: () =>
             `LLM semantic match failed: ${(err as Error).message}`,
+        }
+      }
+    },
+
+    async toEvaluateOutputMetric(trace: TraceHandle, config: EvaluateOutputMetricConfig) {
+      if (!isTraceHandle(trace)) {
+        return {
+          pass: false,
+          message: () =>
+            `Expected a TraceHandle (ctx.trace) but received ${typeof trace}.
+Use: expect(ctx.trace).toEvaluateOutputMetric(...)`,
+        }
+      }
+      if (!config || !config.evaluationPrompt) {
+        return {
+          pass: false,
+          message: () => 'toEvaluateOutputMetric requires evaluationPrompt',
+        }
+      }
+
+      const steps = trace.getLLMSteps()
+      if (steps.length === 0) {
+        return {
+          pass: false,
+          message: () => 'No LLM steps recorded; cannot evaluate output metric.',
+        }
+      }
+
+      const targetIdx = config.index ?? (config.nth !== undefined ? config.nth - 1 : steps.length - 1)
+      if (targetIdx < 0 || targetIdx >= steps.length) {
+        return {
+          pass: false,
+          message: () => `LLM steps length ${steps.length}, but index/nth points to ${targetIdx}.`,
+        }
+      }
+
+      const targetStep = steps[targetIdx]
+      const targetField: EvaluationTarget = config.target ?? 'result'
+      const targetText = targetField === 'prompt' ? targetStep.prompt ?? '' : targetStep.completion ?? ''
+      if (!targetText) {
+        return {
+          pass: false,
+          message: () => `Selected LLM step has empty ${targetField}; cannot evaluate.`,
+        }
+      }
+
+      const condition = (() => {
+        try {
+          return resolveCondition(config.condition)
+        } catch (err) {
+          return err as Error
+        }
+      })()
+      if (condition instanceof Error) {
+        return {
+          pass: false,
+          message: () => condition.message,
+        }
+      }
+
+      const evalPrompt = `
+Evaluation prompt (from user):
+${config.evaluationPrompt}
+
+Score the following text strictly between 0 and 1 (inclusive). Respond with only the number.
+
+Text:
+${targetText}
+      `.trim()
+
+      try {
+        const raw = await callProviderLLM(
+          evalPrompt,
+          { provider: config.provider, model: config.model, sdk: config.sdk },
+          'You are an evaluation assistant. Return only a number between 0 and 1.',
+          16,
+          0
+        )
+        const score = parseFirstNumber(raw)
+        if (score === null) {
+          return {
+            pass: false,
+            message: () => `Could not parse numeric metric from model response: "${raw}"`,
+          }
+        }
+        if (score < 0 || score > 1) {
+          return {
+            pass: false,
+            message: () => `Metric ${score} is out of allowed range 0.0–1.0 (raw: "${raw}")`,
+          }
+        }
+
+        const pass = checkCondition(score, condition)
+        return {
+          pass,
+          message: () => {
+            if (pass) {
+              return `Expected metric NOT to satisfy ${condition.kind} ${condition.value} (score ${score})`
+            }
+            return `Metric check failed: score ${score} did not satisfy ${condition.kind} ${condition.value}. Raw response: "${raw}"`
+          },
+        }
+      } catch (err) {
+        return {
+          pass: false,
+          message: () => `LLM evaluation failed: ${(err as Error).message}`,
         }
       }
     },

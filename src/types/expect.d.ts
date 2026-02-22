@@ -44,6 +44,27 @@ interface SemanticMatchOptions {
   sdk?: unknown // optional user-supplied SDK instance
 }
 
+type EvaluationTarget = 'prompt' | 'result'
+
+interface EvaluationCondition {
+  greaterThan?: number
+  lessThan?: number
+  atLeast?: number
+  atMost?: number
+  equals?: number
+}
+
+interface EvaluateOutputMetricConfig {
+  evaluationPrompt: string
+  target?: EvaluationTarget       // 'prompt' or 'result'; default 'result'
+  index?: number                  // 0-based index into LLM steps
+  nth?: number                    // 1-based alias for index
+  condition?: EvaluationCondition // optional; default atLeast 0.7
+  provider?: SupportedProvider
+  model?: string
+  sdk?: unknown                   // optional SDK instance
+}
+
 declare module 'expect' {
   interface Matchers<R> {
     toHaveLLMStep(config?: LLMStepConfig): R;
@@ -51,5 +72,6 @@ declare module 'expect' {
     toMatchSemanticOutput(expected: string, options?: SemanticMatchOptions): R;
     toHaveCustomStep(config?: CustomStepConfig): R;
     toHavePromptWhere(config: PromptWhereConfig): R;
+    toEvaluateOutputMetric(config: EvaluateOutputMetricConfig): Promise<R>;
   }
 }

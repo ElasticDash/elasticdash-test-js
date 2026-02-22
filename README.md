@@ -4,8 +4,7 @@ An AI-native test runner for ElasticDash workflow testing. Built for async AI pi
 
 - Trace-first: every test receives a `trace` context to record and assert on LLM calls and tool invocations
 - Automatic fetch interception for OpenAI, Gemini, and Grok — no manual instrumentation required
-- AI-specific matchers: `toHaveLLMStep`, `toCallTool`, `toMatchSemanticOutput`, `toHaveCustomStep`
- - AI-specific matchers: `toHaveLLMStep`, `toCallTool`, `toMatchSemanticOutput`, `toHaveCustomStep`, `toHavePromptWhere`
+- AI-specific matchers: `toHaveLLMStep`, `toCallTool`, `toMatchSemanticOutput`, `toHaveCustomStep`, `toHavePromptWhere`, `toEvaluateOutputMetric`
 - Sequential execution, no parallelism overhead
 - No Jest dependency
 
@@ -164,6 +163,40 @@ expect(ctx.trace).toMatchSemanticOutput('order confirmed')
 ```
 
 Environment keys by provider: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `GROK_API_KEY`.
+
+#### `toEvaluateOutputMetric(config)`
+
+Evaluate one LLM step’s prompt or result using an LLM and assert a numeric metric condition in the range 0.0–1.0. Defaults: target=`result`, condition=`atLeast 0.7`, provider=`openai`, model=`gpt-4.1`.
+
+```ts
+// Evaluate the last LLM result with your own prompt; default condition atLeast 0.7
+expect(ctx.trace).toEvaluateOutputMetric({
+  evaluationPrompt: 'Rate how well this answers the user question.',
+})
+
+// Check a specific step (3rd LLM prompt), target the prompt text, require >= 0.8 via Claude
+expect(ctx.trace).toEvaluateOutputMetric({
+  evaluationPrompt: 'Score coherence of this prompt between 0 and 1.',
+  target: 'prompt',
+  nth: 3,
+  condition: { atLeast: 0.8 },
+  provider: 'claude',
+  model: 'claude-3-opus-20240229',
+})
+
+// Custom comparator: score must be < 0.3
+expect(ctx.trace).toEvaluateOutputMetric({
+  evaluationPrompt: 'Rate hallucination risk (0=none, 1=high).',
+  condition: { lessThan: 0.3 },
+})
+```
+
+Options:
+- `evaluationPrompt` (required): your scoring instructions; model is asked to return only a number between 0 and 1.
+- `target`: `'result'` (default) or `'prompt'`. Mutually exclusive; evaluates that text only.
+- `index` / `nth`: pick which LLM step to score (0-based or 1-based). Defaults to the last LLM step.
+- `condition`: one of `greaterThan`, `lessThan`, `atLeast`, `atMost`, `equals`; default is `{ atLeast: 0.7 }`. Fails if the score is outside 0.0–1.0 or cannot be parsed.
+- `provider` / `model` / `sdk`: same shape as `toMatchSemanticOutput` (supports OpenAI, Claude, Gemini, Grok). Requires corresponding API key if no SDK is supplied.
 
 #### `toHaveCustomStep(config?)`
 
