@@ -16,7 +16,7 @@ An AI-native test runner for ElasticDash workflow testing. Built for async AI pi
 npm install elasticdash-test
 ```
 
-Requires Node 20+.
+Requires Node 20+. For Deno projects, see [Using elasticdash-test in Deno](docs/deno.md).
 
 ---
 

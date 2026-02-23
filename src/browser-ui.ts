@@ -172,20 +172,31 @@ export async function startBrowserUiServer(opts: BrowserUiOptions = {}): Promise
   // Ensure base dir for potential static assets (none now)
   const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-  const clients: http.ServerResponse[] = []
+  type FlushableResponse = http.ServerResponse & { flush?: () => void; flushHeaders?: () => void }
+  const clients: FlushableResponse[] = []
+  const eventBuffer: UiEvent[] = []
 
   const handler: http.RequestListener = (req, res) => {
     if (!req.url) return res.end()
     if (req.url.startsWith('/events')) {
-      res.writeHead(200, {
+      const sseRes = res as FlushableResponse
+      sseRes.writeHead(200, {
         'Content-Type': 'text/event-stream',
         Connection: 'keep-alive',
         'Cache-Control': 'no-cache',
       })
-      res.write('\n')
-      clients.push(res)
+      // Prime the connection so browsers render immediately
+      sseRes.flushHeaders?.()
+      sseRes.write(': connected\n\n')
+      sseRes.flush?.()
+      // Replay all previously sent events so late-connecting browsers get the full history
+      for (const e of eventBuffer) {
+        sseRes.write(`data: ${JSON.stringify(e)}\n\n`)
+      }
+      sseRes.flush?.()
+      clients.push(sseRes)
       req.on('close', () => {
-        const idx = clients.indexOf(res)
+        const idx = clients.indexOf(sseRes)
         if (idx >= 0) clients.splice(idx, 1)
       })
       return
@@ -197,6 +208,7 @@ export async function startBrowserUiServer(opts: BrowserUiOptions = {}): Promise
   }
 
   let server: http.Server | undefined
+  let heartbeat: ReturnType<typeof setInterval> | undefined
   let started = false
 
   while (!started) {
@@ -219,13 +231,19 @@ export async function startBrowserUiServer(opts: BrowserUiOptions = {}): Promise
   const url = `http://localhost:${port}`
 
   function send(event: UiEvent): void {
+    eventBuffer.push(event)
     const payload = `data: ${JSON.stringify(event)}\n\n`
     for (const client of [...clients]) {
       client.write(payload)
+      client.flush?.()
     }
   }
 
   function close(): void {
+    if (heartbeat) {
+      clearInterval(heartbeat)
+      heartbeat = undefined
+    }
     for (const client of clients) {
       client.end()
     }
@@ -236,6 +254,14 @@ export async function startBrowserUiServer(opts: BrowserUiOptions = {}): Promise
   if (autoOpen) {
     openBrowser(url)
   }
+
+  // Periodic keepalive comments to keep EventSource connections from timing out
+  heartbeat = setInterval(() => {
+    for (const client of [...clients]) {
+      client.write(': keepalive\n\n')
+      client.flush?.()
+    }
+  }, 5000)
 
   return { url, send, close }
 }

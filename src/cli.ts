@@ -127,6 +127,7 @@ async function bootstrap(): Promise<void> {
 
       const anyFailed = results.some((fr) => fr.results.some((r) => !r.passed))
 
+      let uiDelayMs = 0
       if (ui) {
         const durationMs = Date.now() - startedAt
         const failures: Array<{ name: string; errorMessage?: string }> = []
@@ -149,8 +150,12 @@ async function bootstrap(): Promise<void> {
             failures,
           },
         })
-        // Leave UI running briefly; do not block process exit
-        setTimeout(() => ui.close(), 5000)
+        uiDelayMs = 60000
+      }
+
+      if (uiDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, uiDelayMs))
+        ui?.close()
       }
 
       process.exit(anyFailed ? 1 : 0)
@@ -194,6 +199,7 @@ async function bootstrap(): Promise<void> {
       reportResults(results)
 
       const anyFailed = results.some((fr) => fr.results.some((r) => !r.passed))
+      let uiDelayMs = 0
       if (ui) {
         const durationMs = Date.now() - startedAt
         const failures: Array<{ name: string; errorMessage?: string }> = []
@@ -216,7 +222,12 @@ async function bootstrap(): Promise<void> {
             failures,
           },
         })
-        setTimeout(() => ui.close(), 5000)
+        uiDelayMs = 60000
+      }
+
+      if (uiDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, uiDelayMs))
+        ui?.close()
       }
 
       process.exit(anyFailed ? 1 : 0)
