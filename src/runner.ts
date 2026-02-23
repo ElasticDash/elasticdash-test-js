@@ -42,7 +42,7 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
     ? file
     : pathToFileURL(path.resolve(file)).href
 
-  if (resolvedPath.endsWith('.ts')) {
+  if (resolvedPath.endsWith('.ts') && typeof (globalThis as any).Deno === 'undefined') {
     await import('tsx/esm')
     await import('tsx/cjs')
   }
