@@ -1,6 +1,9 @@
 import '../src/test-setup.js'
 import { expect } from '../src/matchers/index.js'
 import type { AITestContext } from '../src/trace-adapter/context.js'
+// Tip: if you opt into the local proxy (`ELASTICDASH_LLM_PROXY=1`), forward
+// `process.env.ELASTICDASH_TRACE_ID` as `x-trace-id` when you call your Edge/Deno
+// endpoint so proxy-captured LLM calls fold into ctx.trace automatically.
 
 // Simulate an LLM call that records itself into the trace
 async function fakeLLMCall(ctx: AITestContext): Promise<void> {

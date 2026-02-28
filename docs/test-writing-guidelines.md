@@ -132,6 +132,12 @@ elasticdash test examples/
 elasticdash run path/to/file.ai.test.ts
 ```
 
+### Opt-in local LLM capture proxy (Edge/Deno)
+- Set `ELASTICDASH_LLM_PROXY=1` (optional: `ELASTICDASH_LLM_PROXY_PORT`, default `8787`) to start a local proxy when tests run. A per-test `ELASTICDASH_TRACE_ID` env is emitted.
+- Point your LLM SDK at the proxy by setting base URLs during tests only (e.g., `OPENAI_BASE_URL=http://localhost:8787/v1`, `ANTHROPIC_API_URL=http://localhost:8787`).
+- Pass the trace ID to your Edge call (e.g., add `x-trace-id: process.env.ELASTICDASH_TRACE_ID` when invoking your Supabase Edge function). The proxy records model/prompt/completion (or `(streamed)` for streaming) and the runner merges those into `ctx.trace` automatically.
+- If the proxy env is unset, behavior is unchanged and the built-in Node fetch interceptor remains the default.
+
 ## Minimal scaffold
 ```ts
 import 'elasticdash-test/dist/test-setup.js'

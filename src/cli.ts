@@ -11,6 +11,7 @@ import { installAIInterceptor } from './interceptors/ai-interceptor.js'
 import { runFiles } from './runner.js'
 import { reportResults } from './reporter.js'
 import { startBrowserUiServer, type UiEvent } from './browser-ui.js'
+import { startDashboardServer } from './dashboard-server.js'
 
 function stripAnsi(input?: string): string | undefined {
   if (!input) return input
@@ -29,8 +30,13 @@ async function loadConfig(cwd: string): Promise<ElasticDashConfig> {
 
   for (const p of [configPath, configPathJs]) {
     if (existsSync(p)) {
-      const mod = await import(pathToFileURL(p).href)
-      return (mod.default ?? {}) as ElasticDashConfig
+      try {
+        const mod = await import(pathToFileURL(p).href)
+        return (mod.default ?? {}) as ElasticDashConfig
+      } catch (error) {
+        // Skip this config file if it can't be imported (e.g., .ts when running from built dist)
+        continue
+      }
     }
   }
   return {}
@@ -231,6 +237,52 @@ async function bootstrap(): Promise<void> {
       }
 
       process.exit(anyFailed ? 1 : 0)
+    })
+
+  // elasticdash dashboard
+  program
+    .command('dashboard')
+    .description('Browse and search workflow functions')
+    .option('--port <port>', 'Dashboard server port', (v) => Number(v), 4573)
+    .option('--no-open', 'Skip auto-opening browser')
+    .action(async (options: { port: number; open: boolean }) => {
+      console.log('[elasticdash] Starting dashboard server...')
+      
+      const server = await startDashboardServer(cwd, {
+        port: options.port,
+        autoOpen: options.open,
+      })
+      
+      console.log(`[elasticdash] Dashboard running at ${server.url}`)
+      console.log('[elasticdash] Press Ctrl+C to stop')
+      
+      // Keep the process running with proper cleanup
+      let isShuttingDown = false
+      
+      const cleanup = async () => {
+        if (isShuttingDown) {
+          // Force exit on second Ctrl+C
+          console.log('\n[elasticdash] Force exiting...')
+          process.exit(1)
+        }
+        
+        isShuttingDown = true
+        console.log('\n[elasticdash] Shutting down dashboard server...')
+        
+        try {
+          await Promise.race([
+            server.close(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+          ])
+          process.exit(0)
+        } catch (error) {
+          console.error('[elasticdash] Error during shutdown:', error)
+          process.exit(1)
+        }
+      }
+      
+      process.once('SIGINT', cleanup)
+      process.once('SIGTERM', cleanup)
     })
 
   await program.parseAsync(process.argv)

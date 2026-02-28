@@ -15,7 +15,8 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dashboard": "node dist/cli.js dashboard"
   },
   "dependencies": {
     "chalk": "^5.3.0",

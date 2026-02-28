@@ -319,6 +319,12 @@ Notes:
 - Works per async context; if you spawn detached work (child processes/independent workers), pass `trace` explicitly there.
 - Still compatible with manual DI: you can continue passing `ctx.trace` explicitly if you prefer.
 
+### Optional local LLM capture proxy (for Supabase Edge / Deno)
+- Opt in by setting `ELASTICDASH_LLM_PROXY=1` (optional: `ELASTICDASH_LLM_PROXY_PORT`, default `8787`). The runner will start a local proxy and generate a per-test `ELASTICDASH_TRACE_ID`.
+- Point your LLM client at the proxy via base URL envs (e.g., `OPENAI_BASE_URL=http://localhost:8787/v1`, `ANTHROPIC_API_URL=http://localhost:8787`). No code changes in your workflow; only env overrides when running tests.
+- Forward the trace ID to your Edge/Deno code (e.g., add `x-trace-id: process.env.ELASTICDASH_TRACE_ID` on the request to your Supabase Edge function). The proxy records model/prompt/completion (or `(streamed)`) and the runner folds captured steps back into `ctx.trace` after each test.
+- When `ELASTICDASH_LLM_PROXY` is unset, behavior is unchanged and the existing Node fetch interceptor remains the default.
+
 ---
 
 ## Configuration
@@ -358,6 +364,83 @@ Add an `examples/tsconfig.json` (or your test directory's `tsconfig.json`) that 
 ```
 
 This gives you typed `aiTest`, `beforeAll`, `afterAll` globals and typed custom matchers in your test files.
+
+---
+
+## Workflows Dashboard
+
+Browse and search all available workflow functions in your project:
+
+```bash
+elasticdash dashboard         # open dashboard at http://localhost:4573
+elasticdash dashboard --port 4572  # use custom port
+elasticdash dashboard --no-open    # skip auto-opening browser
+```
+
+The dashboard scans `ed_workflow.ts` or `ed_workflow.js` and displays:
+- **Function names** — all exported functions in the module
+- **Signatures** — function parameters and return types
+- **Async indicator** — marks async vs sync functions
+- **Source module** — where the function is imported from (if re-exported)
+- **File path** — location of the workflow file
+
+Use the search field to filter workflows by:
+- **Name** — find workflow by function name (e.g., `checkoutFlow`)
+- **Source module** — find all workflows from a specific module (e.g., `app.workflows`)
+- **File path** — filter by location in your codebase
+
+This is useful for discovering available workflows, understanding their signatures, and identifying where functions are defined before calling them in tests.
+
+### `ed_workflow.ts`, `ed_tools.ts`, `ed_agents.ts`
+
+These optional files bundle and re-export existing functions from your codebase for use in tests.
+
+#### `ed_workflow.ts`
+
+Re-export workflow functions from your application:
+
+```ts
+// ed_workflow.ts
+export { orderWorkflow, refundWorkflow } from './src/workflows'
+export { userLookupFlow } from './src/user-flows'
+```
+
+Access in tests:
+
+```ts
+import { orderWorkflow } from './ed_workflow'
+
+aiTest('full order workflow', async (ctx) => {
+  const result = await orderWorkflow('order-123', 'cust-456')
+  expect(ctx.trace).toCallTool('chargeCard')
+})
+```
+
+#### `ed_tools.ts`
+
+Re-export tool functions that agents or workflows can invoke:
+
+```ts
+// ed_tools.ts
+export { chargeCard, fetchOrderStatus, sendNotification } from './src/tools'
+```
+
+#### `ed_agents.ts`
+
+Re-export agent functions or create a config object:
+
+```ts
+// ed_agents.ts
+export { checkoutAgent, paymentAgent } from './src/agents'
+
+// Or as a config object:
+export const agents = {
+  checkout: checkoutAgent,
+  payment: paymentAgent,
+}
+```
+
+The dashboard command will scan these files and display all exported functions with their signatures, making it easy to explore your workflow API.
 
 ---
 

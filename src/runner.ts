@@ -1,7 +1,9 @@
 import { clearRegistry, getRegistry } from './core/registry.js'
 import { startTraceSession, setCurrentTrace } from './trace-adapter/context.js'
+import { startLLMProxy, fetchCapturedTrace } from './proxy/llm-capture.js'
 import type { RunnerHooks } from './trace-adapter/context.js'
 import { pathToFileURL } from 'node:url'
+import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
 export interface TestResult {
@@ -21,17 +23,30 @@ export interface RunnerOptions {
 }
 
 export async function runFiles(files: string[], options: RunnerOptions = {}): Promise<FileResult[]> {
+  // Optional local LLM capture proxy (opt-in via env). Default behavior stays unchanged when disabled.
+  const proxyOptIn = process.env.ELASTICDASH_LLM_PROXY === '1' || Boolean(process.env.ELASTICDASH_LLM_PROXY_URL)
+  const proxyPort = Number.parseInt(process.env.ELASTICDASH_LLM_PROXY_PORT || '8787', 10)
+  let proxyUrl = process.env.ELASTICDASH_LLM_PROXY_URL
+  const proxyHandle = proxyOptIn && !proxyUrl ? await startLLMProxy({ port: proxyPort }) : null
+  if (proxyHandle) {
+    proxyUrl = proxyHandle.url
+  }
+
   const fileResults: FileResult[] = []
 
   for (const file of files) {
-    const result = await runFile(file, options)
+    const result = await runFile(file, options, { proxyOptIn, proxyUrl })
     fileResults.push(result)
+  }
+
+  if (proxyHandle) {
+    await proxyHandle.stop()
   }
 
   return fileResults
 }
 
-async function runFile(file: string, options: RunnerOptions): Promise<FileResult> {
+async function runFile(file: string, options: RunnerOptions, proxyCtx: { proxyOptIn: boolean; proxyUrl: string | null | undefined }): Promise<FileResult> {
   const { hooks = {} } = options
 
   // 1. Clear the global registry before loading the file
@@ -69,7 +84,11 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
   // 4. Execute each test sequentially
   for (const entry of registry.tests) {
     const { context, finalise } = startTraceSession()
+    const traceId = proxyCtx.proxyOptIn ? randomUUID() : null
     setCurrentTrace(context.trace)
+    if (traceId) {
+      process.env.ELASTICDASH_TRACE_ID = traceId
+    }
 
     if (hooks.onTestStart) {
       await hooks.onTestStart(entry.name)
@@ -123,8 +142,25 @@ async function runFile(file: string, options: RunnerOptions): Promise<FileResult
       await hooks.onTraceComplete(entry.name, context.trace)
     }
 
+    // If proxy mode is enabled, pull captured LLM steps and fold into the trace
+    if (traceId && proxyCtx.proxyUrl) {
+      try {
+        const captured = await fetchCapturedTrace(proxyCtx.proxyUrl, traceId)
+        for (const step of captured) {
+          context.trace.recordLLMStep(step)
+        }
+      } catch (proxyErr) {
+        // Non-fatal: keep test result as-is
+        // eslint-disable-next-line no-console
+        console.warn('[elasticdash] Failed to fetch proxy-captured steps:', proxyErr)
+      }
+    }
+
     finalise()
     setCurrentTrace(undefined)
+    if (traceId) {
+      delete process.env.ELASTICDASH_TRACE_ID
+    }
 
     results.push({ name: entry.name, passed, durationMs, error })
   }
