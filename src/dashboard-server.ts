@@ -299,7 +299,7 @@ function getDashboardHtml(): string {
                   <div class="trace-section-title">Observations</div>
                   <div class="observation-table-wrap">
                     <table class="observation-table">
-                      <thead id="observationTableHead"><tr><th style="width: 40px;"></th><th style="width: 65%;">Name</th><th>Type</th></tr></thead>
+                      <thead id="observationTableHead"><tr><th style="width: 65%;">Name</th><th>Type</th><th>Action</th></tr></thead>
                       <tbody id="observationTableBody"></tbody>
                     </table>
                   </div>
@@ -467,10 +467,11 @@ function getDashboardHtml(): string {
                   <td><span class="obs-type \${typeClass}">\${esc(type)}</span></td>
                 </tr>\`;
               } else if (currentStep === 4) {
-                // Step 4: Verify - no checkboxes, just show checked items
-                return \`<tr class="\${isSelected ? "selected" : ""}" onclick="selectObservation(\${actualIndex})">
-                  <td>\${esc(name)}</td>
+                // Step 4: Verify - show rerun button in Action column
+                return \`<tr class="\${isSelected ? "selected" : ""}">
+                  <td onclick="selectObservation(\${actualIndex})">\${esc(name)}</td>
                   <td><span class="obs-type \${typeClass}">\${esc(type)}</span></td>
+                  <td><button class="btn btn-primary rerun-btn" data-index="\${actualIndex}">Rerun</button><span class="rerun-spinner" style="display:none;margin-left:8px;"><span class="spinner"></span></span></td>
                 </tr>\`;
               }
             }).join("");
