@@ -443,6 +443,51 @@ function getDashboardHtml(): string {
         }
 
           function renderObservationTable() {
+
+            if (currentStep === 5) {
+              // Step 5: Validate updated flow with live data
+              // Render traces table and observations table for selected trace
+              // For demo, use checkedObservations as traces
+              if (!checkedObservations.size) {
+                observationTableBody.innerHTML = '<tr><td colspan="2" style="padding: 16px; color: #777;">No traces found.</td></tr>';
+                return;
+              }
+              if (typeof window.step5SelectedTrace !== "number") window.step5SelectedTrace = 0;
+              const traces = Array.from(checkedObservations).map(idx => currentObservations[idx]);
+              let tracesTable = \`<div class="trace-section-title">Traces</div>
+                <div class="observation-table-wrap">
+                  <table class="observation-table">
+                    <thead><tr><th>Name</th></tr></thead>
+                    <tbody>\`;
+              tracesTable += traces.map((trace, i) => {
+                const isSelected = i === window.step5SelectedTrace;
+                const name = trace.name || trace.id || ("Trace " + (i + 1));
+                return \`<tr class="\${isSelected ? "selected" : ""}" onclick="window.step5SelectedTrace=\${i};renderObservationTable();"><td>\${esc(name)}</td></tr>\`;
+              }).join("");
+              tracesTable += \`</tbody></table></div>\`;
+
+              // Observations table for selected trace
+              let observationsTable = "";
+              if (traces[window.step5SelectedTrace]) {
+                const actions = traces[window.step5SelectedTrace].actions || [];
+                observationsTable += \`<div class="trace-section-title">Observations</div>
+                  <div class="observation-table-wrap">
+                    <table class="observation-table">
+                      <thead><tr><th>Name</th><th>Type</th></tr></thead>
+                      <tbody>\`;
+                observationsTable += actions.map((action, j) => {
+                  const name = action.name || action.id || ("Observation " + (j + 1));
+                  const type = action.type || "UNKNOWN";
+                  const typeClass = type === "TOOL" ? "tool" : "ai";
+                  return \`<tr><td>\${esc(name)}</td><td><span class="obs-type \${typeClass}">\${esc(type)}</span></td></tr>\`;
+                }).join("");
+                observationsTable += \`</tbody></table></div>\`;
+              }
+
+              observationTableBody.innerHTML = tracesTable + observationsTable;
+              return;
+            }
+              
             const obsToRender = currentStep === 4 ? Array.from(checkedObservations).map(idx => currentObservations[idx]) : currentObservations;
             const indices = currentStep === 4 ? Array.from(checkedObservations) : currentObservations.map((_, i) => i);
             
@@ -539,6 +584,8 @@ function getDashboardHtml(): string {
             uploadArea.classList.remove("hidden");
             traceViewer.classList.remove("visible");
             modalFooter.classList.remove("visible");
+            let customFooter = document.getElementById("step5FooterBtns");
+            if (customFooter) customFooter.remove();
             uploadStatus.className = "upload-status";
             uploadStatus.textContent = "";
             fileInput.value = "";
@@ -574,9 +621,24 @@ function getDashboardHtml(): string {
               nextBtn.textContent = "Fix Works as Expected";
               nextBtn.disabled = false;
             } else if (currentStep === 5) {
-              // Step 5 - buttons can be hidden or disabled
-              changeBtn.style.display = "none";
-              nextBtn.style.display = "none";
+              // Step 5 - show custom buttons
+              changeBtn.textContent = "Still Failing";
+              nextBtn.textContent = "Done";
+              changeBtn.onclick = () => {
+                currentStep = 3;
+                updateModalTitle();
+                updateFooterButtons();
+                renderObservationTable();
+                customFooter.remove();
+              };
+              nextBtn.onclick = () => {
+                modal.classList.remove("open");
+                resetTraceModal();
+                customFooter.remove();
+              };
+            } else {
+              let customFooter = document.getElementById("step5FooterBtns");
+              if (customFooter) customFooter.remove();
             }
           }
         
