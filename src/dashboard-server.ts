@@ -355,6 +355,12 @@ function getDashboardHtml(): string {
             updateModalTitle();
             updateFooterButtons();
             renderObservationTable();
+          } else if (currentStep === 5) {
+            currentStep = 3;
+            updateModalTitle();
+            updateFooterButtons();
+            renderObservationTable();
+            customFooter.remove();
           }
         };
         
@@ -378,6 +384,10 @@ function getDashboardHtml(): string {
             renderObservationTable();
             console.log("[Dashboard] Moving to Step 5: Validate updated flow");
             // TODO: Implement Step 5 UI
+          } else if (currentStep === 5) {
+            modal.classList.remove("open");
+            resetTraceModal();
+            customFooter.remove();
           }
         };
         
@@ -624,18 +634,6 @@ function getDashboardHtml(): string {
               // Step 5 - show custom buttons
               changeBtn.textContent = "Still Failing";
               nextBtn.textContent = "Done";
-              changeBtn.onclick = () => {
-                currentStep = 3;
-                updateModalTitle();
-                updateFooterButtons();
-                renderObservationTable();
-                customFooter.remove();
-              };
-              nextBtn.onclick = () => {
-                modal.classList.remove("open");
-                resetTraceModal();
-                customFooter.remove();
-              };
             } else {
               let customFooter = document.getElementById("step5FooterBtns");
               if (customFooter) customFooter.remove();
