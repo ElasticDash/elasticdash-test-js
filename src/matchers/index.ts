@@ -91,7 +91,7 @@ const defaultModels: Record<SupportedProvider, string> = {
 }
 
 // Helper: call an LLM provider (or SDK) and return the text content
-async function callProviderLLM(
+export async function callProviderLLM(
   prompt: string,
   options: SemanticMatchOptions = {},
   systemPrompt = 'You are an expert test judge.',

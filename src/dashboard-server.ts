@@ -2,6 +2,8 @@ import http from 'node:http'
 import path from 'node:path'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+import { callProviderLLM } from './matchers/index.js'
 
 export interface WorkflowInfo {
   name: string
@@ -45,6 +47,253 @@ interface ParsedExport {
   filePath: string
   lineNumber?: number
   sourceCode?: string
+}
+
+type SupportedProvider = 'openai' | 'claude' | 'gemini' | 'grok'
+
+interface DashboardObservation {
+  type?: string
+  name?: string
+  input?: unknown
+  model?: string
+  provider?: string
+  modelParameters?: {
+    temperature?: number
+    max_tokens?: number
+  }
+}
+
+interface RerunResult {
+  ok: boolean
+  currentOutput?: unknown
+  error?: string
+}
+
+let tsxRuntimeRegistered = false
+
+async function ensureTsxRuntime(): Promise<void> {
+  if (tsxRuntimeRegistered) return
+  await import('tsx/esm')
+  await import('tsx/cjs')
+  tsxRuntimeRegistered = true
+}
+
+function resolveRuntimeModule(cwd: string, baseName: string): string | null {
+  for (const ext of ['.ts', '.tsx', '.js', '.jsx']) {
+    const candidate = path.join(cwd, `${baseName}${ext}`)
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+function parseSignatureParams(signature?: string): string[] {
+  if (!signature) return []
+  const trimmed = signature.trim()
+  if (!trimmed.startsWith('(') || !trimmed.endsWith(')')) return []
+  const body = trimmed.slice(1, -1).trim()
+  if (!body) return []
+
+  return body
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .map(part => part.replace(/^\.\.\./, '').split('=')[0].split(':')[0].replace(/\?/g, '').trim())
+    .filter(part => /^[$A-Z_][0-9A-Z_$]*$/i.test(part))
+}
+
+function normalizeMessageContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part
+        if (part && typeof part === 'object' && typeof (part as any).text === 'string') return (part as any).text
+        try {
+          return JSON.stringify(part)
+        } catch {
+          return String(part)
+        }
+      })
+      .join('\n')
+  }
+  if (content && typeof content === 'object') {
+    if (typeof (content as any).text === 'string') return (content as any).text
+    try {
+      return JSON.stringify(content)
+    } catch {
+      return String(content)
+    }
+  }
+  return content == null ? '' : String(content)
+}
+
+function extractPromptFromGenerationInput(input: unknown): { prompt: string; systemPrompt?: string } {
+  if (typeof input === 'string') {
+    return { prompt: input }
+  }
+
+  const messages = Array.isArray(input)
+    ? input
+    : input && typeof input === 'object' && Array.isArray((input as any).messages)
+      ? (input as any).messages
+      : null
+
+  if (messages && messages.length > 0) {
+    const systemParts: string[] = []
+    const promptParts: string[] = []
+    for (const message of messages as Array<any>) {
+      const role = typeof message?.role === 'string' ? message.role : 'user'
+      const content = normalizeMessageContent(message?.content).trim()
+      if (!content) continue
+      if (role === 'system') {
+        systemParts.push(content)
+      } else {
+        promptParts.push(`${role}: ${content}`)
+      }
+    }
+    return {
+      prompt: promptParts.join('\n\n') || systemParts.join('\n\n') || JSON.stringify(input),
+      systemPrompt: systemParts.length > 0 ? systemParts.join('\n\n') : undefined,
+    }
+  }
+
+  if (input && typeof input === 'object' && typeof (input as any).prompt === 'string') {
+    return {
+      prompt: (input as any).prompt,
+      systemPrompt: typeof (input as any).systemPrompt === 'string' ? (input as any).systemPrompt : undefined,
+    }
+  }
+
+  try {
+    return { prompt: JSON.stringify(input) }
+  } catch {
+    return { prompt: String(input ?? '') }
+  }
+}
+
+function inferProvider(observation: DashboardObservation): SupportedProvider {
+  const provider = observation.provider?.toLowerCase()
+  if (provider === 'openai' || provider === 'claude' || provider === 'gemini' || provider === 'grok') {
+    return provider
+  }
+  const model = observation.model?.toLowerCase() ?? ''
+  if (model.includes('claude')) return 'claude'
+  if (model.includes('gemini')) return 'gemini'
+  if (model.includes('grok')) return 'grok'
+  return 'openai'
+}
+
+function buildToolArgs(input: unknown, tool?: ToolInfo): unknown[] {
+  if (input === undefined) return []
+  if (Array.isArray(input)) return input
+  if (input && typeof input === 'object') {
+    const argObject = input as Record<string, unknown>
+    const paramNames = parseSignatureParams(tool?.signature)
+    if (paramNames.length > 0 && paramNames.every(name => Object.prototype.hasOwnProperty.call(argObject, name))) {
+      return paramNames.map(name => argObject[name])
+    }
+    return [input]
+  }
+  return [input]
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
+async function runToolObservation(cwd: string, observation: DashboardObservation, tools: ToolInfo[]): Promise<RerunResult> {
+  const toolName = observation.name
+  if (!toolName) {
+    return { ok: false, error: 'Missing tool name on observation.' }
+  }
+
+  const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools')
+  if (!toolsModulePath) {
+    return { ok: false, error: 'Cannot find ed_tools.ts/js in workspace root.' }
+  }
+
+  try {
+    if (/\.tsx?$/.test(toolsModulePath)) {
+      await ensureTsxRuntime()
+    }
+    const mod = await import(pathToFileURL(toolsModulePath).href)
+    const fn = mod[toolName]
+    if (typeof fn !== 'function') {
+      return { ok: false, error: `Tool "${toolName}" is not an exported function in ${path.basename(toolsModulePath)}.` }
+    }
+    const toolInfo = tools.find(tool => tool.name === toolName)
+    const args = buildToolArgs(observation.input, toolInfo)
+    const output = await fn(...args)
+    return { ok: true, currentOutput: output }
+  } catch (error) {
+    return { ok: false, error: `Tool rerun failed: ${formatError(error)}` }
+  }
+}
+
+async function runGenerationObservation(observation: DashboardObservation): Promise<RerunResult> {
+  try {
+    const { prompt, systemPrompt } = extractPromptFromGenerationInput(observation.input)
+    if (!prompt.trim()) {
+      return { ok: false, error: 'Generation input is empty; cannot rerun.' }
+    }
+    const provider = inferProvider(observation)
+    const model = observation.model
+    const temperature = typeof observation.modelParameters?.temperature === 'number' ? observation.modelParameters.temperature : 0
+    const maxTokens = typeof observation.modelParameters?.max_tokens === 'number' ? observation.modelParameters.max_tokens : 512
+
+    const output = await callProviderLLM(
+      prompt,
+      { provider, model },
+      systemPrompt ?? 'You are a helpful assistant.',
+      maxTokens,
+      temperature,
+    )
+
+    return { ok: true, currentOutput: output }
+  } catch (error) {
+    return { ok: false, error: `Generation rerun failed: ${formatError(error)}` }
+  }
+}
+
+async function rerunObservation(cwd: string, observation: DashboardObservation, tools: ToolInfo[]): Promise<RerunResult> {
+  const type = observation.type?.toUpperCase()
+  if (type === 'TOOL') {
+    return runToolObservation(cwd, observation, tools)
+  }
+  if (type === 'GENERATION') {
+    return runGenerationObservation(observation)
+  }
+  return { ok: false, error: `Unsupported observation type: ${observation.type ?? '(missing type)'}` }
+}
+
+function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let raw = ''
+    req.setEncoding('utf8')
+    req.on('data', (chunk) => {
+      raw += chunk
+      if (raw.length > 2_000_000) {
+        reject(new Error('Request body too large.'))
+      }
+    })
+    req.on('end', () => {
+      if (!raw.trim()) {
+        resolve({})
+        return
+      }
+      try {
+        resolve(JSON.parse(raw))
+      } catch {
+        reject(new Error('Invalid JSON body.'))
+      }
+    })
+    req.on('error', reject)
+  })
 }
 
 /**
@@ -333,6 +582,25 @@ export async function startDashboardServer(
       const result = q.length >= 8 ? searchInFiles(cwd, q) : null
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(result ?? {}))
+    } else if (url.pathname === '/api/rerun-observation' && req.method === 'POST') {
+      ;(async () => {
+        try {
+          const body = (await readJsonBody(req)) as { observation?: DashboardObservation }
+          if (!body?.observation || typeof body.observation !== 'object') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'Request must include an observation object.' }))
+            return
+          }
+
+          const result = await rerunObservation(cwd, body.observation, tools)
+          const statusCode = result.ok ? 200 : 400
+          res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(result))
+        } catch (error) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: formatError(error) }))
+        }
+      })()
     } else {
       res.writeHead(200, { 'Content-Type': 'text/html' })
       res.end(getDashboardHtml())

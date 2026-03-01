@@ -71,6 +71,10 @@
             .btn-primary:disabled:hover { background: #0066cc; }
             .btn-secondary:disabled:hover { background: #f0f0f0; }
             .obs-checkbox { width: 18px; height: 18px; cursor: pointer; }
+            .rerun-status { display: inline-block; margin-left: 8px; font-size: 11px; font-weight: 600; }
+            .rerun-status.running { color: #666; }
+            .rerun-status.success { color: #1f7a44; }
+            .rerun-status.error { color: #c62828; }
             @media (max-width: 900px) {
             .trace-layout { grid-template-columns: 1fr; }
             .observation-table-wrap { max-height: 260px; }
@@ -132,6 +136,8 @@
             console.log("[Dashboard] Script starting...");
             let allWorkflows = [], codeIndex = {workflows: [], tools: []}, selectedWorkflow = null;
             let currentObservations = [], selectedObservationIndex = -1;
+            let rerunOutputs = new Map();
+            let rerunInFlight = new Set();
             const tbody = document.getElementById("workflowsTableBody");
             const countEl = document.getElementById("resultCount");
             const modal = document.getElementById("traceModal");
@@ -461,10 +467,12 @@
                     </tr>`;
                 } else if (currentStep === 4) {
                     // Step 4: Verify - show rerun button in Action column
+                    const isRunning = rerunInFlight.has(actualIndex);
+                    const statusBadge = renderRerunStatusBadge(actualIndex);
                     return `<tr class="${isSelected ? "selected" : ""}">
                     <td onclick="selectObservation(${actualIndex})">${esc(name)}</td>
                     <td><span class="obs-type ${typeClass}">${esc(type)}</span></td>
-                    <td><button class="btn btn-primary rerun-btn" data-index="${actualIndex}">Rerun</button><span class="rerun-spinner" style="display:none;margin-left:8px;"><span class="spinner"></span></span></td>
+                    <td><button class="btn btn-primary rerun-btn" data-index="${actualIndex}" ${isRunning ? "disabled" : ""}>${isRunning ? "Running..." : "Rerun"}</button>${statusBadge}</td>
                     </tr>`;
                 }
                 }).join("");
@@ -479,6 +487,15 @@
                     } else {
                         checkedObservations.delete(idx);
                     }
+                    };
+                });
+                } else if (currentStep === 4) {
+                document.querySelectorAll(".rerun-btn").forEach(btn => {
+                    btn.onclick = async (e) => {
+                    e.stopPropagation();
+                    const idx = parseInt(btn.getAttribute("data-index"), 10);
+                    if (!Number.isFinite(idx)) return;
+                    await rerunObservation(idx);
                     };
                 });
                 }
@@ -506,8 +523,69 @@
                     <div class="detail-title">Output</div>
                     <pre class="detail-pre">${esc(outputText)}</pre>
                 </div>
+                ${renderCurrentOutputSection(index, obs)}
                 </div>`;
                 if (obs.type === "GENERATION") resolveGenFilePath(obs, detailId);
+            }
+
+            async function rerunObservation(index) {
+                const obs = currentObservations[index];
+                if (!obs) {
+                return;
+                }
+
+                rerunInFlight.add(index);
+                renderObservationTable();
+
+                try {
+                const response = await fetch('/api/rerun-observation', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ observation: obs }),
+                });
+                const data = await response.json();
+                if (response.ok && data.ok) {
+                    rerunOutputs.set(index, { ok: true, output: data.currentOutput });
+                } else {
+                    rerunOutputs.set(index, { ok: false, error: data.error || 'Rerun failed.' });
+                }
+                } catch (err) {
+                rerunOutputs.set(index, {
+                    ok: false,
+                    error: err && err.message ? err.message : String(err),
+                });
+                } finally {
+                rerunInFlight.delete(index);
+                if (selectedObservationIndex === index) {
+                    selectObservation(index);
+                } else {
+                    renderObservationTable();
+                }
+                }
+            }
+
+            function renderCurrentOutputSection(index, obs) {
+                const rerun = rerunOutputs.get(index);
+                if (!rerun) return '';
+                const text = rerun.ok
+                ? toDisplayText(rerun.output, obs?.type)
+                : `Rerun failed: ${rerun.error || 'Unknown error'}`;
+                return `<div class="detail-section">
+                <div class="detail-title">Current Output</div>
+                <pre class="detail-pre">${esc(text)}</pre>
+                </div>`;
+            }
+
+            function renderRerunStatusBadge(index) {
+                if (rerunInFlight.has(index)) {
+                return '<span class="rerun-status running">Running…</span>';
+                }
+                const rerun = rerunOutputs.get(index);
+                if (!rerun) return '';
+                if (rerun.ok) {
+                return '<span class="rerun-status success">Succeeded</span>';
+                }
+                return '<span class="rerun-status error">Failed</span>';
             }
 
             function getObsFilePath(obs) {
@@ -598,6 +676,8 @@
                 currentObservations = [];
                 selectedObservationIndex = -1;
                 checkedObservations.clear();
+                rerunOutputs.clear();
+                rerunInFlight.clear();
                 observationTableBody.innerHTML = "";
                 observationDetail.innerHTML = "";
                 currentStep = 0;
