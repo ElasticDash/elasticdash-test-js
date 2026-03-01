@@ -217,7 +217,6 @@ function getDashboardHtml(): string {
         .modal-header { display: flex; justify-content: space-between; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #eee; }
         .modal-title { font-size: 20px; font-weight: 600; }
         .modal-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #999; }
-        .modal-intro { background: #f0f7ff; border-left: 4px solid #0066cc; padding: 12px 15px; border-radius: 4px; margin-bottom: 20px; font-size: 14px; }
         .upload-area { border: 2px dashed #ddd; border-radius: 8px; padding: 30px; text-align: center; cursor: pointer; background: #fafafa; }
         .upload-area:hover { border-color: #0066cc; background: #f0f7ff; }
         .upload-icon { font-size: 32px; margin-bottom: 12px; }
@@ -228,7 +227,8 @@ function getDashboardHtml(): string {
         .hidden { display: none !important; }
         .trace-viewer { display: none; margin-top: 20px; }
         .trace-viewer.visible { display: block; }
-        .trace-layout { display: grid; grid-template-columns: 40% 60%; gap: 16px; min-height: 420px; }
+        .trace-layout { display: grid; grid-template-columns: 40% calc(60% - 16px); gap: 16px; min-height: 420px; }
+        .trace-layout.step-5 { display: grid; grid-template-columns: calc(30% - 16px) calc(30% - 16px) 40%; gap: 16px; min-height: 420px; }
         .trace-left, .trace-right { background: #f9f9f9; border-radius: 8px; padding: 14px; border: 1px solid #eee; }
         .trace-section-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
         .observation-table-wrap { max-height: 460px; overflow: auto; background: white; border-radius: 6px; border: 1px solid #eee; }
@@ -245,7 +245,7 @@ function getDashboardHtml(): string {
         .detail-sections { display: flex; flex-direction: column; gap: 12px; height: 486.5px; overflow-y: auto; }
         .detail-section { background: white; border: 1px solid #eee; border-radius: 6px; padding: 10px; }
         .detail-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: #555; text-transform: uppercase; letter-spacing: 0.02em; }
-        .detail-pre { margin: 0; font-family: Monaco, monospace; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: #fafafa; border-radius: 4px; padding: 10px; border: 1px solid #f0f0f0; min-height: 56px; max-height: 400px; overflow-y: auto; }
+        .detail-pre { margin: 0; font-family: Monaco, monospace; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: #fafafa; border-radius: 4px; padding: 10px; border: 1px solid #f0f0f0; min-height: 56px; max-height: 340px; overflow-y: auto; }
         .modal-footer { display: none; margin-top: 24px; padding-top: 20px; border-top: 1px solid #eee; gap: 12px; justify-content: space-between; }
         .modal-footer.visible { display: flex; }
         .btn { padding: 10px 20px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; border: none; }
@@ -286,7 +286,6 @@ function getDashboardHtml(): string {
                 <h2 class="modal-title">Import Trace for Analysis</h2>
                 <button class="modal-close" id="closeModal">&times;</button>
             </div>
-            <div class="modal-intro"><strong>Debug workflow:</strong> Upload a Langfuse trace JSON to analyze LLM calls and tool invocations.</div>
             <div id="uploadArea" class="upload-area">
                 <div class="upload-icon">📤</div>
                 <div>Drop trace file here or click to select</div>
@@ -327,8 +326,8 @@ function getDashboardHtml(): string {
         const modalFooter = document.getElementById("modalFooter");
         const uploadStatus = document.getElementById("uploadStatus");
         const traceViewer = document.getElementById("traceViewer");
-        const observationTableBody = document.getElementById("observationTableBody");
-        const observationDetail = document.getElementById("observationDetail");
+        let observationTableBody = document.getElementById("observationTableBody");
+        let observationDetail = document.getElementById("observationDetail");
         const modalTitle = document.querySelector(".modal-title");
         console.log("[Dashboard] DOM elements loaded, tbody:", tbody);
         
@@ -405,6 +404,8 @@ function getDashboardHtml(): string {
                       window.liveValidationDialog.remove();
                       window.liveValidationDialog = null;
                       window.liveValidationCount = count;
+                      window.step5SelectedTrace = 0;
+                      window.step5SelectedObservation = 0;
                       currentStep = 5;
                       updateModalTitle();
                       updateFooterButtons();
@@ -485,57 +486,53 @@ function getDashboardHtml(): string {
         }
 
           function renderObservationTable() {
-
             if (currentStep === 5) {
               // Step 5: Validate updated flow with live data
-              // 3-column layout: traces, observations, details
-              if (!checkedObservations.size) {
-                observationTableBody.innerHTML = '<tr><td colspan="3" style="padding: 16px; color: #777;">No traces found.</td></tr>';
-                return;
-              }
-              if (typeof window.step5SelectedTrace !== "number") window.step5SelectedTrace = 0;
-              if (typeof window.step5SelectedObservation !== "number") window.step5SelectedObservation = 0;
-              const traces = Array.from(checkedObservations).map(idx => currentObservations[idx]);
-              let tracesTable = \`<div class="trace-section-title">Traces</div>
+              // Render traceTable before observationsTable
+              const n = window.liveValidationCount || 1;
+              const traceCount = n + 1;
+              document.getElementsByClassName("trace-layout")[0].classList.add("step-5");
+              let traceTable = \`<div class="trace-section-title">Traces</div>
                 <div class="observation-table-wrap">
                   <table class="observation-table">
-                    <thead><tr><th>Name</th></tr></thead>
+                    <thead><tr><th>Trace #</th></tr></thead>
                     <tbody>\`;
-              tracesTable += traces.map((trace, i) => {
+              for (let i = 0; i < traceCount; i++) {
                 const isSelected = i === window.step5SelectedTrace;
-                const name = trace.name || trace.id || ("Trace " + (i + 1));
-                return \`<tr class="\${isSelected ? "selected" : ""}" onclick="window.step5SelectedTrace=\${i};window.step5SelectedObservation=0;renderObservationTable();"><td>\${esc(name)}</td></tr>\`;
-              }).join("");
-              tracesTable += \`</tbody></table></div>\`;
+                const label = i === 0 ? "Original Trace" : \`Trace \${i}\`;
+                traceTable += \`<tr class="\${isSelected ? "selected" : ""}" onclick="window.step5SelectedTrace=\${i};window.step5SelectedObservation=0;renderObservationTable();"><td>\${label}</td></tr>\`;
+              }
+              traceTable += \`</tbody></table></div>\`;
 
               // Observations table for selected trace
               let observationsTable = "";
               let detailsSection = "";
-              if (traces[window.step5SelectedTrace]) {
-                const actions = traces[window.step5SelectedTrace].actions || [];
+              const traces = Array.from(checkedObservations).map(idx => currentObservations[idx]);
+
+              if (window.step5SelectedTrace === 0) {
+                // Original Trace: show all currentObservations (same as step 3)
                 observationsTable += \`<div class="trace-section-title">Observations</div>
                   <div class="observation-table-wrap">
                     <table class="observation-table">
                       <thead><tr><th>Name</th><th>Type</th></tr></thead>
                       <tbody>\`;
-                observationsTable += actions.map((action, j) => {
+                observationsTable += currentObservations.map((obs, j) => {
                   const isSelected = j === window.step5SelectedObservation;
-                  const name = action.name || action.id || ("Observation " + (j + 1));
-                  const type = action.type || "UNKNOWN";
+                  const name = obs.name || obs.id || ("Observation " + (j + 1));
+                  const type = obs.type || "UNKNOWN";
                   const typeClass = type === "TOOL" ? "tool" : "ai";
                   return \`<tr class="\${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=\${j};renderObservationTable();"><td>\${esc(name)}</td><td><span class="obs-type \${typeClass}">\${esc(type)}</span></td></tr>\`;
                 }).join("");
                 observationsTable += \`</tbody></table></div>\`;
                 // Details for selected observation
-                if (actions[window.step5SelectedObservation]) {
-                  const obs = actions[window.step5SelectedObservation];
-                  const inputText = toDisplayText(obs.input, obs.type);
-                  const outputText = toDisplayText(obs.output, obs.type);
-                  const mockFilePath = traces[window.step5SelectedTrace].filePath || "/mock/path/relevant-function.ts";
+                const selObs = currentObservations[window.step5SelectedObservation];
+                if (selObs) {
+                  const inputText = toDisplayText(selObs.input, selObs.type);
+                  const outputText = toDisplayText(selObs.output, selObs.type);
                   detailsSection = \`<div class="detail-sections">
                     <div class="detail-section">
                       <div class="detail-title">File Path</div>
-                      <pre class="detail-pre">\${esc(mockFilePath)}</pre>
+                      <pre class="detail-pre">/mock/path/relevant-function.ts</pre>
                     </div>
                     <div class="detail-section">
                       <div class="detail-title">Input</div>
@@ -547,17 +544,79 @@ function getDashboardHtml(): string {
                     </div>
                   </div>\`;
                 }
+              } else {
+                // Live traces: index 1 → traces[0], index 2 → traces[1], …
+                const liveTrace = traces[window.step5SelectedTrace - 1];
+                if (liveTrace) {
+                  const actions = liveTrace.actions || [];
+                  observationsTable += \`<div class="trace-section-title">Observations</div>
+                    <div class="observation-table-wrap">
+                      <table class="observation-table">
+                        <thead><tr><th>Name</th><th>Type</th></tr></thead>
+                        <tbody>\`;
+                  observationsTable += actions.map((action, j) => {
+                    const isSelected = j === window.step5SelectedObservation;
+                    const name = action.name || action.id || ("Observation " + (j + 1));
+                    const type = action.type || "UNKNOWN";
+                    const typeClass = type === "TOOL" ? "tool" : "ai";
+                    return \`<tr class="\${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=\${j};renderObservationTable();"><td>\${esc(name)}</td><td><span class="obs-type \${typeClass}">\${esc(type)}</span></td></tr>\`;
+                  }).join("");
+                  observationsTable += \`</tbody></table></div>\`;
+                  // Details for selected observation
+                  if (actions[window.step5SelectedObservation]) {
+                    const obs = actions[window.step5SelectedObservation];
+                    const inputText = toDisplayText(obs.input, obs.type);
+                    const outputText = toDisplayText(obs.output, obs.type);
+                    const mockFilePath = liveTrace.filePath || "/mock/path/relevant-function.ts";
+                    detailsSection = \`<div class="detail-sections">
+                      <div class="detail-section">
+                        <div class="detail-title">File Path</div>
+                        <pre class="detail-pre">\${esc(mockFilePath)}</pre>
+                      </div>
+                      <div class="detail-section">
+                        <div class="detail-title">Input</div>
+                        <pre class="detail-pre">\${esc(inputText)}</pre>
+                      </div>
+                      <div class="detail-section">
+                        <div class="detail-title">Output</div>
+                        <pre class="detail-pre">\${esc(outputText)}</pre>
+                      </div>
+                    </div>\`;
+                  }
+                }
               }
 
-              // Render 3 columns side by side
-              observationTableBody.innerHTML = \`<div style="display:flex;gap:18px;align-items:flex-start;">
-                <div style="flex:0 0 180px;min-width:140px;max-width:220px;">\${tracesTable}</div>
-                <div style="flex:0 0 260px;min-width:180px;max-width:320px;">\${observationsTable}</div>
-                <div style="flex:1 1 0;min-width:220px;">\${detailsSection}</div>
-              </div>\`;
+              // Render 3 sibling columns inside the CSS grid
+              const traceLayout = document.getElementsByClassName("trace-layout")[0];
+              traceLayout.innerHTML = \`
+                <div class="trace-left">\${traceTable}</div>
+                <div class="trace-left">\${observationsTable || '<div class="trace-section-title">Observations</div>'}</div>
+                <div class="trace-right">\${detailsSection}</div>
+              \`;
               return;
             }
-              
+            
+            const traceLayoutEl = document.getElementsByClassName("trace-layout")[0];
+            if (traceLayoutEl.classList.contains("step-5")) {
+              traceLayoutEl.classList.remove("step-5");
+              traceLayoutEl.innerHTML = \`
+                <div class="trace-left">
+                  <div class="trace-section-title">Observations</div>
+                  <div class="observation-table-wrap">
+                    <table class="observation-table">
+                      <thead id="observationTableHead"><tr><th style="width: 65%;">Name</th><th>Type</th><th>Action</th></tr></thead>
+                      <tbody id="observationTableBody"></tbody>
+                    </table>
+                  </div>
+                </div>
+                <div class="trace-right">
+                  <div id="observationDetail"></div>
+                </div>
+              \`;
+              observationTableBody = document.getElementById("observationTableBody");
+              observationDetail = document.getElementById("observationDetail");
+            }
+
             const obsToRender = currentStep === 4 ? Array.from(checkedObservations).map(idx => currentObservations[idx]) : currentObservations;
             const indices = currentStep === 4 ? Array.from(checkedObservations) : currentObservations.map((_, i) => i);
             
