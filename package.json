@@ -12,7 +12,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "node scripts/inline-html.js && tsc",
+    "build": "node scripts/inline-html.js && tsc && npm run restore:inline-html",
+    "restore:inline-html": "node scripts/restore-inline-html.js",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",

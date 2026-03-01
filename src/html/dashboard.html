@@ -116,7 +116,7 @@
                     <div class="trace-section-title">Observations</div>
                     <div class="observation-table-wrap">
                         <table class="observation-table">
-                        <thead id="observationTableHead"><tr><th style="width: 65%;">Name</th><th>Type</th><th>Action</th></tr></thead>
+                        <thead id="observationTableHead"><tr><th style="width: 40px;">Check</th><th>Name</th><th>Type</th></tr></thead>
                         <tbody id="observationTableBody"></tbody>
                         </table>
                     </div>
@@ -138,6 +138,8 @@
             let currentObservations = [], selectedObservationIndex = -1;
             let rerunOutputs = new Map();
             let rerunInFlight = new Set();
+            let step5RunTraces = [];
+            let step5RunMeta = { loading: false, error: '', runCount: 0, sequential: false };
             const tbody = document.getElementById("workflowsTableBody");
             const countEl = document.getElementById("resultCount");
             const modal = document.getElementById("traceModal");
@@ -207,6 +209,10 @@
                         <h3 style="margin-top:0;margin-bottom:18px;font-size:20px;">Validate Updated Flow with Live Data</h3>
                         <label style="font-size:15px;display:block;margin-bottom:8px;">How many times do you want to run the flow with live data?</label>
                         <input id="liveValidationCount" type="number" min="1" value="1" style="width:80px;font-size:16px;padding:6px 10px;margin-bottom:18px;" />
+                        <label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:18px;">
+                            <input id="liveValidationSequential" type="checkbox" />
+                            Run in sequence instead of parallel
+                        </label>
                         <div style="display:flex;gap:12px;justify-content:flex-end;">
                             <button id="cancelLiveValidation" class="btn btn-secondary">Cancel</button>
                             <button id="submitLiveValidation" class="btn btn-primary">Validate</button>
@@ -218,17 +224,71 @@
                         window.liveValidationDialog.remove();
                         window.liveValidationDialog = null;
                     };
-                    document.getElementById('submitLiveValidation').onclick = function() {
+                    document.getElementById('submitLiveValidation').onclick = async function() {
                         const count = parseInt(document.getElementById('liveValidationCount').value, 10);
+                        const sequential = document.getElementById('liveValidationSequential').checked;
                         if (count >= 1) {
+                        const submitBtn = document.getElementById('submitLiveValidation');
+                        submitBtn.disabled = true;
+                        submitBtn.textContent = 'Validating...';
                         window.liveValidationDialog.remove();
                         window.liveValidationDialog = null;
                         window.liveValidationCount = count;
+                        window.liveValidationSequential = sequential;
                         window.step5SelectedTrace = 0;
                         window.step5SelectedObservation = 0;
+
+                        step5RunTraces = [];
+                        step5RunMeta = { loading: true, error: '', runCount: count, sequential };
+
                         currentStep = 5;
                         updateModalTitle();
                         updateFooterButtons();
+                        renderObservationTable();
+
+                        try {
+                            const response = await fetch('/api/validate-workflow', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    workflowName: selectedWorkflow?.name,
+                                    runCount: count,
+                                    sequential,
+                                    observations: currentObservations,
+                                }),
+                            });
+                            const data = await response.json();
+                            if (response.ok && data.ok) {
+                                step5RunTraces = Array.isArray(data.traces) ? data.traces : [];
+                                step5RunMeta = {
+                                    loading: false,
+                                    error: '',
+                                    runCount: typeof data.runCount === 'number' ? data.runCount : count,
+                                    sequential: data.mode === 'sequential',
+                                };
+                            } else {
+                                step5RunTraces = [];
+                                step5RunMeta = {
+                                    loading: false,
+                                    error: data.error || 'Workflow validation failed.',
+                                    runCount: count,
+                                    sequential,
+                                };
+                            }
+                        } catch (err) {
+                            step5RunTraces = [];
+                            step5RunMeta = {
+                                loading: false,
+                                error: err && err.message ? err.message : String(err),
+                                runCount: count,
+                                sequential,
+                            };
+                        }
+
+                        if (window.step5SelectedTrace > step5RunTraces.length) {
+                            window.step5SelectedTrace = 0;
+                        }
+                        window.step5SelectedObservation = 0;
                         renderObservationTable();
                         console.log("[Dashboard] Moving to Step 5: Validate updated flow");
                         } else {
@@ -280,16 +340,18 @@
                     );
                 } else {
                     const trace = data.trace || data;
-                    obs = (data.observations || trace.observations || []).filter(o => 
+                    // Handle multiple formats: data.data, data.observations, trace.observations
+                    const rawObs = data.data || data.observations || trace.observations || [];
+                    obs = rawObs.filter(o => 
                         (o.type === "GENERATION" || o.type === "TOOL" || o.type === "SPAN") &&
                         (o.input !== null && o.input !== undefined) &&
                         (o.output !== null && o.output !== undefined)
                     );
                 }
-                // Sort by timestamp ascending
+                // Sort by startTime ascending
                 obs = obs.sort((a, b) => {
-                    const timeA = new Date(a.startTime || a.createdAt || 0).getTime();
-                    const timeB = new Date(b.startTime || b.createdAt || 0).getTime();
+                    const timeA = new Date(a.startTime || 0).getTime();
+                    const timeB = new Date(b.startTime || 0).getTime();
                     return timeA - timeB;
                 });
                 currentObservations = obs;
@@ -309,8 +371,8 @@
                 if (currentStep === 5) {
                 // Step 5: Validate updated flow with live data
                 // Render traceTable before observationsTable
-                const n = window.liveValidationCount || 1;
-                const traceCount = n + 1;
+                const traces = Array.isArray(step5RunTraces) ? step5RunTraces : [];
+                const traceCount = traces.length + 1;
                 document.getElementsByClassName("trace-layout")[0].classList.add("step-5");
                 let traceTable = `<div class="trace-section-title">Traces</div>
                     <div class="observation-table-wrap">
@@ -319,7 +381,9 @@
                         <tbody>`;
                 for (let i = 0; i < traceCount; i++) {
                     const isSelected = i === window.step5SelectedTrace;
-                    const label = i === 0 ? "Original Trace" : `Trace ${i}`;
+                    const run = i === 0 ? null : traces[i - 1];
+                    const status = run ? (run.ok ? ' ✓' : ' ✗') : '';
+                    const label = i === 0 ? "Original Trace" : `Trace ${run?.runNumber ?? i}${status}`;
                     traceTable += `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedTrace=${i};window.step5SelectedObservation=0;renderObservationTable();"><td>${label}</td></tr>`;
                 }
                 traceTable += `</tbody></table></div>`;
@@ -327,7 +391,10 @@
                 // Observations table for selected trace
                 let observationsTable = "";
                 let detailsSection = "";
-                const traces = Array.from(checkedObservations).map(idx => currentObservations[idx]);
+
+                if (window.step5SelectedTrace > traces.length) {
+                    window.step5SelectedTrace = 0;
+                }
 
                 if (window.step5SelectedTrace === 0) {
                     // Original Trace: show all currentObservations (same as step 3)
@@ -371,7 +438,7 @@
                     // Live traces: index 1 → traces[0], index 2 → traces[1], …
                     const liveTrace = traces[window.step5SelectedTrace - 1];
                     if (liveTrace) {
-                    const actions = liveTrace.actions || [];
+                    const actions = Array.isArray(liveTrace.observations) ? liveTrace.observations : [];
                     observationsTable += `<div class="trace-section-title">Observations</div>
                         <div class="observation-table-wrap">
                         <table class="observation-table">
@@ -411,6 +478,22 @@
                     }
                 }
 
+                if (step5RunMeta.loading) {
+                    detailsSection = `<div class="detail-sections">
+                        <div class="detail-section">
+                            <div class="detail-title">Validation</div>
+                            <pre class="detail-pre">Running ${step5RunMeta.runCount || 1} workflow run(s) in ${step5RunMeta.sequential ? 'sequence' : 'parallel'} mode...</pre>
+                        </div>
+                    </div>`;
+                } else if (step5RunMeta.error && !detailsSection) {
+                    detailsSection = `<div class="detail-sections">
+                        <div class="detail-section">
+                            <div class="detail-title">Validation Error</div>
+                            <pre class="detail-pre">${esc(step5RunMeta.error)}</pre>
+                        </div>
+                    </div>`;
+                }
+
                 // Render 3 sibling columns inside the CSS grid
                 const traceLayout = document.getElementsByClassName("trace-layout")[0];
                 traceLayout.innerHTML = `
@@ -424,12 +507,18 @@
                 const traceLayoutEl = document.getElementsByClassName("trace-layout")[0];
                 if (traceLayoutEl.classList.contains("step-5")) {
                 traceLayoutEl.classList.remove("step-5");
+                let headerHtml = '';
+                if (currentStep === 3) {
+                    headerHtml = '<tr><th style="width: 40px;">Check</th><th>Name</th><th>Type</th></tr>';
+                } else if (currentStep === 4) {
+                    headerHtml = '<tr><th style="width: 65%;">Name</th><th>Type</th><th>Action</th></tr>';
+                }
                 traceLayoutEl.innerHTML = `
                     <div class="trace-left">
                     <div class="trace-section-title">Observations</div>
                     <div class="observation-table-wrap">
                         <table class="observation-table">
-                        <thead id="observationTableHead"><tr><th style="width: 65%;">Name</th><th>Type</th><th>Action</th></tr></thead>
+                        <thead id="observationTableHead">${headerHtml}</thead>
                         <tbody id="observationTableBody"></tbody>
                         </table>
                     </div>
@@ -596,28 +685,75 @@
                 return null;
             }
 
-            function getSystemPromptFragment(obs) {
+            function extractSystemPrompt(obs) {
                 if (!obs || obs.type !== "GENERATION") return null;
-                const input = obs.input;
+                let input = obs.input;
+                // Parse input if it's a JSON string
+                if (typeof input === 'string') {
+                    try {
+                        input = JSON.parse(input);
+                    } catch { /* not JSON */ }
+                }
                 const messages = Array.isArray(input) ? input
                 : (input && Array.isArray(input.messages)) ? input.messages : [];
                 const sys = messages.find(m => m && m.role === "system");
                 if (!sys || !sys.content) return null;
-                return String(sys.content).trim().slice(0, 60);
+                return String(sys.content).trim();
+            }
+
+            function getSearchFragments(systemPrompt) {
+                if (!systemPrompt || systemPrompt.length < 10) return [];
+                const fragments = [];
+                
+                // 1. First sentence (often unique: "You are an expert SQL generator...")
+                const firstSentence = systemPrompt.split(/[.!?]\n/)[0].trim();
+                if (firstSentence.length >= 20 && firstSentence.length <= 100) {
+                    fragments.push(firstSentence);
+                }
+                
+                // 2. First 50 chars
+                if (systemPrompt.length >= 40) {
+                    fragments.push(systemPrompt.slice(0, 50).trim());
+                }
+                
+                // 3. First 80 chars (if different from above)
+                if (systemPrompt.length >= 80) {
+                    const fragment80 = systemPrompt.slice(0, 80).trim();
+                    if (!fragments.some(f => fragment80.startsWith(f))) {
+                        fragments.push(fragment80);
+                    }
+                }
+                
+                // 4. Try to find a unique phrase after common prefixes
+                const afterYouAre = systemPrompt.match(/You are (?:an? )?([^.\n]{15,60})/);
+                if (afterYouAre && afterYouAre[1]) {
+                    fragments.push(afterYouAre[1].trim());
+                }
+                
+                return fragments.filter(f => f.length >= 15);
             }
 
             async function resolveGenFilePath(obs, containerId) {
-                const fragment = getSystemPromptFragment(obs);
-                if (!fragment || fragment.length < 8) return;
+                const systemPrompt = extractSystemPrompt(obs);
+                if (!systemPrompt) return;
+                
+                const fragments = getSearchFragments(systemPrompt);
+                if (fragments.length === 0) return;
+                
                 try {
-                const res = await fetch('/api/search-source?q=' + encodeURIComponent(fragment));
-                const data = await res.json();
-                if (!data.filePath) return;
-                const label = data.lineNumber ? data.filePath + ':' + data.lineNumber : data.filePath;
-                const container = document.getElementById(containerId);
-                if (!container) return;
-                const placeholder = container.querySelector('.file-path-placeholder');
-                if (placeholder) placeholder.outerHTML = renderFilePath(label);
+                    // Try each fragment until we find a match
+                    for (const fragment of fragments) {
+                        const res = await fetch('/api/search-source?q=' + encodeURIComponent(fragment));
+                        const data = await res.json();
+                        if (data.filePath) {
+                            const label = data.lineNumber ? data.filePath + ':' + data.lineNumber : data.filePath;
+                            const container = document.getElementById(containerId);
+                            if (!container) return;
+                            const placeholder = container.querySelector('.file-path-placeholder');
+                            if (placeholder) placeholder.outerHTML = renderFilePath(label);
+                            return; // Success, stop trying
+                        }
+                    }
                 } catch { /* ignore network errors */ }
             }
 
@@ -644,23 +780,42 @@
                 </div>`;
             }
 
+            function stripMarkdownCodeFence(text) {
+                // Remove markdown code fences like ```sql, ```json, ```, etc.
+                return text.replace(/^```[\w]*\n?/gm, '').replace(/\n?```$/gm, '').trim();
+            }
+
             function toDisplayText(value, type) {
                 if (value === null || value === undefined || value === "") {
-                return "No data";
+                    return "No data";
                 }
+                
+                // If it's a string, try to parse it first (might be JSON)
                 if (typeof value === "string") {
-                return value;
+                    try {
+                        const parsed = JSON.parse(value);
+                        value = parsed; // Use parsed version for further processing
+                    } catch {
+                        // Not JSON, strip markdown and return
+                        return stripMarkdownCodeFence(value);
+                    }
                 }
-                if (type === "GENERATION" && value.messages) {
-                return JSON.stringify(value.messages, null, 2);
-                }
+                
+                // Handle GENERATION output format: {role, content, ...}
                 if (type === "GENERATION" && value.role && value.content) {
-                return value.content || "No content";
+                    return stripMarkdownCodeFence(value.content || "No content");
                 }
+                
+                // Handle GENERATION input format: {messages: [...]}
+                if (type === "GENERATION" && value.messages) {
+                    return JSON.stringify(value.messages, null, 2);
+                }
+                
+                // For other objects, stringify them
                 try {
-                return JSON.stringify(value, null, 2);
+                    return JSON.stringify(value, null, 2);
                 } catch {
-                return String(value);
+                    return String(value);
                 }
             }
 
@@ -678,6 +833,8 @@
                 checkedObservations.clear();
                 rerunOutputs.clear();
                 rerunInFlight.clear();
+                step5RunTraces = [];
+                step5RunMeta = { loading: false, error: '', runCount: 0, sequential: false };
                 observationTableBody.innerHTML = "";
                 observationDetail.innerHTML = "";
                 currentStep = 0;
