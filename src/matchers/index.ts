@@ -36,7 +36,7 @@ interface PromptWhereConfig {
   nth?: number                     // optional 1-based alias for index
 }
 
-type SupportedProvider = 'openai' | 'claude' | 'gemini' | 'grok'
+type SupportedProvider = 'openai' | 'claude' | 'gemini' | 'grok' | 'kimi'
 
 interface SemanticMatchOptions {
   provider?: SupportedProvider
@@ -88,6 +88,7 @@ const defaultModels: Record<SupportedProvider, string> = {
   claude: 'claude-3-opus-20240229',
   gemini: 'gemini-1.5-pro',
   grok: 'grok-beta',
+  kimi: 'kimi-k2-turbo-preview',
 }
 
 // Helper: call an LLM provider (or SDK) and return the text content
@@ -249,6 +250,34 @@ export async function callProviderLLM(
 
       if (!response.ok) {
         throw new Error(`Grok API error: ${response.status} ${response.statusText}`)
+      }
+      const data: any = await response.json()
+      return data.choices?.[0]?.message?.content?.trim() ?? ''
+    }
+
+    case 'kimi': {
+      const apiKey = process.env.KIMI_API_KEY
+      if (!apiKey) throw new Error('KIMI_API_KEY is not set in environment.')
+
+      const response = await fetch('https://api.moonshot.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: resolvedModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt },
+          ],
+          max_tokens: maxTokens,
+          temperature,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Kimi API error: ${response.status} ${response.statusText}`)
       }
       const data: any = await response.json()
       return data.choices?.[0]?.message?.content?.trim() ?? ''

@@ -49,7 +49,7 @@ interface ParsedExport {
   sourceCode?: string
 }
 
-type SupportedProvider = 'openai' | 'claude' | 'gemini' | 'grok'
+type SupportedProvider = 'openai' | 'claude' | 'gemini' | 'grok' | 'kimi'
 
 interface DashboardObservation {
   type?: string
@@ -173,13 +173,14 @@ function extractPromptFromGenerationInput(input: unknown): { prompt: string; sys
 
 function inferProvider(observation: DashboardObservation): SupportedProvider {
   const provider = observation.provider?.toLowerCase()
-  if (provider === 'openai' || provider === 'claude' || provider === 'gemini' || provider === 'grok') {
+  if (provider === 'openai' || provider === 'claude' || provider === 'gemini' || provider === 'grok' || provider === 'kimi') {
     return provider
   }
   const model = observation.model?.toLowerCase() ?? ''
   if (model.includes('claude')) return 'claude'
   if (model.includes('gemini')) return 'gemini'
   if (model.includes('grok')) return 'grok'
+  if (model.includes('kimi')) return 'kimi'
   return 'openai'
 }
 
