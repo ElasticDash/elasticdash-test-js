@@ -378,12 +378,44 @@ function getDashboardHtml(): string {
             renderObservationTable();
           } else if (currentStep === 4) {
             // Move to Step 5
-            currentStep = 5;
-            updateModalTitle();
-            updateFooterButtons();
-            renderObservationTable();
-            console.log("[Dashboard] Moving to Step 5: Validate updated flow");
-            // TODO: Implement Step 5 UI
+                // Show validation dialog before moving to Step 5
+                if (!window.liveValidationDialog) {
+                  window.liveValidationDialog = document.createElement('div');
+                  window.liveValidationDialog.id = 'liveValidationDialog';
+                  window.liveValidationDialog.style = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center;z-index:9999;';
+                  window.liveValidationDialog.innerHTML = \`
+                    <div style="background:white;padding:32px 28px;border-radius:12px;box-shadow:0 2px 24px #0002;min-width:340px;max-width:90vw;">
+                      <h3 style="margin-top:0;margin-bottom:18px;font-size:20px;">Validate Updated Flow with Live Data</h3>
+                      <label style="font-size:15px;display:block;margin-bottom:8px;">How many times do you want to run the flow with live data?</label>
+                      <input id="liveValidationCount" type="number" min="1" value="1" style="width:80px;font-size:16px;padding:6px 10px;margin-bottom:18px;" />
+                      <div style="display:flex;gap:12px;justify-content:flex-end;">
+                        <button id="cancelLiveValidation" class="btn btn-secondary">Cancel</button>
+                        <button id="submitLiveValidation" class="btn btn-primary">Validate</button>
+                      </div>
+                    </div>
+                  \`;
+                  document.body.appendChild(window.liveValidationDialog);
+                  document.getElementById('cancelLiveValidation').onclick = function() {
+                    window.liveValidationDialog.remove();
+                    window.liveValidationDialog = null;
+                  };
+                  document.getElementById('submitLiveValidation').onclick = function() {
+                    const count = parseInt(document.getElementById('liveValidationCount').value, 10);
+                    if (count >= 1) {
+                      window.liveValidationDialog.remove();
+                      window.liveValidationDialog = null;
+                      window.liveValidationCount = count;
+                      currentStep = 5;
+                      updateModalTitle();
+                      updateFooterButtons();
+                      renderObservationTable();
+                      console.log("[Dashboard] Moving to Step 5: Validate updated flow");
+                    } else {
+                      document.getElementById('liveValidationCount').style.borderColor = 'red';
+                    }
+                  };
+                  return;
+                }
           } else if (currentStep === 5) {
             modal.classList.remove("open");
             resetTraceModal();
@@ -456,13 +488,13 @@ function getDashboardHtml(): string {
 
             if (currentStep === 5) {
               // Step 5: Validate updated flow with live data
-              // Render traces table and observations table for selected trace
-              // For demo, use checkedObservations as traces
+              // 3-column layout: traces, observations, details
               if (!checkedObservations.size) {
-                observationTableBody.innerHTML = '<tr><td colspan="2" style="padding: 16px; color: #777;">No traces found.</td></tr>';
+                observationTableBody.innerHTML = '<tr><td colspan="3" style="padding: 16px; color: #777;">No traces found.</td></tr>';
                 return;
               }
               if (typeof window.step5SelectedTrace !== "number") window.step5SelectedTrace = 0;
+              if (typeof window.step5SelectedObservation !== "number") window.step5SelectedObservation = 0;
               const traces = Array.from(checkedObservations).map(idx => currentObservations[idx]);
               let tracesTable = \`<div class="trace-section-title">Traces</div>
                 <div class="observation-table-wrap">
@@ -472,12 +504,13 @@ function getDashboardHtml(): string {
               tracesTable += traces.map((trace, i) => {
                 const isSelected = i === window.step5SelectedTrace;
                 const name = trace.name || trace.id || ("Trace " + (i + 1));
-                return \`<tr class="\${isSelected ? "selected" : ""}" onclick="window.step5SelectedTrace=\${i};renderObservationTable();"><td>\${esc(name)}</td></tr>\`;
+                return \`<tr class="\${isSelected ? "selected" : ""}" onclick="window.step5SelectedTrace=\${i};window.step5SelectedObservation=0;renderObservationTable();"><td>\${esc(name)}</td></tr>\`;
               }).join("");
               tracesTable += \`</tbody></table></div>\`;
 
               // Observations table for selected trace
               let observationsTable = "";
+              let detailsSection = "";
               if (traces[window.step5SelectedTrace]) {
                 const actions = traces[window.step5SelectedTrace].actions || [];
                 observationsTable += \`<div class="trace-section-title">Observations</div>
@@ -486,15 +519,42 @@ function getDashboardHtml(): string {
                       <thead><tr><th>Name</th><th>Type</th></tr></thead>
                       <tbody>\`;
                 observationsTable += actions.map((action, j) => {
+                  const isSelected = j === window.step5SelectedObservation;
                   const name = action.name || action.id || ("Observation " + (j + 1));
                   const type = action.type || "UNKNOWN";
                   const typeClass = type === "TOOL" ? "tool" : "ai";
-                  return \`<tr><td>\${esc(name)}</td><td><span class="obs-type \${typeClass}">\${esc(type)}</span></td></tr>\`;
+                  return \`<tr class="\${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=\${j};renderObservationTable();"><td>\${esc(name)}</td><td><span class="obs-type \${typeClass}">\${esc(type)}</span></td></tr>\`;
                 }).join("");
                 observationsTable += \`</tbody></table></div>\`;
+                // Details for selected observation
+                if (actions[window.step5SelectedObservation]) {
+                  const obs = actions[window.step5SelectedObservation];
+                  const inputText = toDisplayText(obs.input, obs.type);
+                  const outputText = toDisplayText(obs.output, obs.type);
+                  const mockFilePath = traces[window.step5SelectedTrace].filePath || "/mock/path/relevant-function.ts";
+                  detailsSection = \`<div class="detail-sections">
+                    <div class="detail-section">
+                      <div class="detail-title">File Path</div>
+                      <pre class="detail-pre">\${esc(mockFilePath)}</pre>
+                    </div>
+                    <div class="detail-section">
+                      <div class="detail-title">Input</div>
+                      <pre class="detail-pre">\${esc(inputText)}</pre>
+                    </div>
+                    <div class="detail-section">
+                      <div class="detail-title">Output</div>
+                      <pre class="detail-pre">\${esc(outputText)}</pre>
+                    </div>
+                  </div>\`;
+                }
               }
 
-              observationTableBody.innerHTML = tracesTable + observationsTable;
+              // Render 3 columns side by side
+              observationTableBody.innerHTML = \`<div style="display:flex;gap:18px;align-items:flex-start;">
+                <div style="flex:0 0 180px;min-width:140px;max-width:220px;">\${tracesTable}</div>
+                <div style="flex:0 0 260px;min-width:180px;max-width:320px;">\${observationsTable}</div>
+                <div style="flex:1 1 0;min-width:220px;">\${detailsSection}</div>
+              </div>\`;
               return;
             }
               
