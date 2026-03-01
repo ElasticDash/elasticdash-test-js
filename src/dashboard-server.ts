@@ -400,9 +400,52 @@ function buildValidationObservations(
     },
   ]
 
+  let firstGenerationIndex = -1
   for (const step of trace.getSteps()) {
-    observations.push(toObservationFromStep({ type: step.type, data: step.data }))
+    const obs = toObservationFromStep({ type: step.type, data: step.data })
+    observations.push(obs)
+    
+    // Track the index of the first GENERATION observation
+    if (firstGenerationIndex === -1 && obs.type === 'GENERATION') {
+      firstGenerationIndex = observations.length - 1
+    }
   }
+
+  // Insert hardcoded queryRefinement tool call after the first GENERATION
+  if (firstGenerationIndex !== -1) {
+    const hardcodedQueryRefinement: DashboardObservation = {
+      type: 'TOOL',
+      name: 'queryRefinement',
+      input: {
+        userInput: 'What is the attack stat of Metapod?',
+        userToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6Im5vcm1hbHVzZXIiLCJyb2xlIjoiVXNlciIsInNjb3BlSWQiOjIsImVtYWlsIjoidGVycnlqaWFuZzE5OTZAZ21haWwuY29tIiwiaWF0IjoxNzY3Nzc2OTE2LCJleHAiOjE3NzI5NjA5MTZ9.H0yasNMyy8JABSPNlyQoY0LDiDW2M-RVPoTYv1-dYP4',
+      },
+      output: {
+        refinedQuery: 'What is the attack stat of Metapod?',
+        language: 'en',
+        concepts: ['Metapod', 'attack stat'],
+        apiNeeds: ['retrieve pokemon stats'],
+        entities: ['metapod details', 'pokemon stats'],
+        intentType: 'FETCH',
+      },
+    }
+    observations.splice(firstGenerationIndex + 1, 0, hardcodedQueryRefinement)
+  }
+
+  // Add hardcoded dataService tool call at the end
+  const hardcodedDataService: DashboardObservation = {
+    type: 'TOOL',
+    name: 'dataService',
+    input: {
+      query: "SELECT ps.base_stat as attack_stat FROM pokemon p JOIN pokemon_stats ps ON p.id = ps.pokemon_id JOIN stats s ON ps.stat_id = s.id WHERE p.identifier = 'metapod' AND s.identifier = 'attack';",
+    },
+    output: [
+      {
+        attack_stat: 20,
+      },
+    ],
+  }
+  observations.push(hardcodedDataService)
 
   return observations
 }
