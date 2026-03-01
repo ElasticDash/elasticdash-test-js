@@ -169,8 +169,8 @@ export async function startBrowserUiServer(opts: BrowserUiOptions = {}): Promise
   const autoOpen = opts.autoOpen !== false
   let port = opts.port ?? 4571
 
-  // Ensure base dir for potential static assets (none now)
-  const __dirname = path.dirname(fileURLToPath(import.meta.url))
+  // // Ensure base dir for potential static assets (none now)
+  // const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
   type FlushableResponse = http.ServerResponse & { flush?: () => void; flushHeaders?: () => void }
   const clients: FlushableResponse[] = []

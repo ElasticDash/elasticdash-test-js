@@ -377,12 +377,26 @@ elasticdash dashboard --port 4572  # use custom port
 elasticdash dashboard --no-open    # skip auto-opening browser
 ```
 
-The dashboard scans `ed_workflow.ts` or `ed_workflow.js` and displays:
-- **Function names** — all exported functions in the module
-- **Signatures** — function parameters and return types
-- **Async indicator** — marks async vs sync functions
-- **Source module** — where the function is imported from (if re-exported)
-- **File path** — location of the workflow file
+The dashboard scans your workflow/tool files and displays:
+  - If both `.ts` and `.js` versions of a file exist (e.g., `ed_workflows.ts` and `ed_workflows.js`), the dashboard will always use the `.ts` file.
+  - If only `.ts` exists, it will be automatically transpiled to `.js` before scanning/importing—no manual build step required.
+  - If only `.js` exists, it will be used directly.
+
+This means you can write your workflows and tools in TypeScript, and the dashboard will handle transpilation automatically. You do not need to run `tsc` or build manually for dashboard usage.
+
+**Example file selection logic:**
+| Scenario                | File Used         |
+|-------------------------|------------------|
+| Only `ed_workflows.ts`   | Transpiled `.ts` |
+| Only `ed_workflows.js`   | `.js`            |
+| Both exist              | `.ts` (preferred)|
+
+The dashboard displays:
+  - **Function names** — all exported functions in the module
+  - **Signatures** — function parameters and return types
+  - **Async indicator** — marks async vs sync functions
+  - **Source module** — where the function is imported from (if re-exported)
+  - **File path** — location of the workflow file
 
 Use the search field to filter workflows by:
 - **Name** — find workflow by function name (e.g., `checkoutFlow`)
@@ -391,16 +405,16 @@ Use the search field to filter workflows by:
 
 This is useful for discovering available workflows, understanding their signatures, and identifying where functions are defined before calling them in tests.
 
-### `ed_workflow.ts`, `ed_tools.ts`, `ed_agents.ts`
+### `ed_workflows.ts`, `ed_tools.ts`, `ed_agents.ts`
 
 These optional files bundle and re-export existing functions from your codebase for use in tests.
 
-#### `ed_workflow.ts`
+#### `ed_workflows.ts`
 
 Re-export workflow functions from your application:
 
 ```ts
-// ed_workflow.ts
+// ed_workflows.ts
 export { orderWorkflow, refundWorkflow } from './src/workflows'
 export { userLookupFlow } from './src/user-flows'
 ```
@@ -408,7 +422,7 @@ export { userLookupFlow } from './src/user-flows'
 Access in tests:
 
 ```ts
-import { orderWorkflow } from './ed_workflow'
+import { orderWorkflow } from './ed_workflows'
 
 aiTest('full order workflow', async (ctx) => {
   const result = await orderWorkflow('order-123', 'cust-456')
