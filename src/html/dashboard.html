@@ -231,33 +231,43 @@
                         const submitBtn = document.getElementById('submitLiveValidation');
                         submitBtn.disabled = true;
                         submitBtn.textContent = 'Validating...';
-                        window.liveValidationDialog.remove();
-                        window.liveValidationDialog = null;
-                        window.liveValidationCount = count;
-                        window.liveValidationSequential = sequential;
-                        window.step5SelectedTrace = 0;
-                        window.step5SelectedObservation = 0;
-
-                        step5RunTraces = [];
-                        step5RunMeta = { loading: true, error: '', runCount: count, sequential };
-
-                        currentStep = 5;
-                        updateModalTitle();
-                        updateFooterButtons();
-                        renderObservationTable();
+                        
+                        console.log('[Dashboard] Starting validation:', {
+                            workflow: selectedWorkflow?.name,
+                            count,
+                            sequential,
+                            observationsCount: currentObservations.length
+                        });
 
                         try {
+                            const payload = {
+                                workflowName: selectedWorkflow?.name,
+                                runCount: count,
+                                sequential,
+                                observations: currentObservations,
+                            };
+                            console.log('[Dashboard] Sending validation request:', payload);
+                            
                             const response = await fetch('/api/validate-workflow', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    workflowName: selectedWorkflow?.name,
-                                    runCount: count,
-                                    sequential,
-                                    observations: currentObservations,
-                                }),
+                                body: JSON.stringify(payload),
                             });
+                            
                             const data = await response.json();
+                            console.log('[Dashboard] Validation response:', data);
+                            
+                            // Close dialog and move to step 5
+                            window.liveValidationDialog.remove();
+                            window.liveValidationDialog = null;
+                            window.liveValidationCount = count;
+                            window.liveValidationSequential = sequential;
+                            window.step5SelectedTrace = 0;
+                            window.step5SelectedObservation = 0;
+                            currentStep = 5;
+                            updateModalTitle();
+                            updateFooterButtons();
+                            
                             if (response.ok && data.ok) {
                                 step5RunTraces = Array.isArray(data.traces) ? data.traces : [];
                                 step5RunMeta = {
@@ -266,6 +276,7 @@
                                     runCount: typeof data.runCount === 'number' ? data.runCount : count,
                                     sequential: data.mode === 'sequential',
                                 };
+                                console.log('[Dashboard] Validation succeeded:', step5RunTraces.length, 'traces');
                             } else {
                                 step5RunTraces = [];
                                 step5RunMeta = {
@@ -274,8 +285,16 @@
                                     runCount: count,
                                     sequential,
                                 };
+                                console.error('[Dashboard] Validation failed:', data.error);
                             }
                         } catch (err) {
+                            console.error('[Dashboard] Validation error:', err);
+                            window.liveValidationDialog.remove();
+                            window.liveValidationDialog = null;
+                            currentStep = 5;
+                            updateModalTitle();
+                            updateFooterButtons();
+                            
                             step5RunTraces = [];
                             step5RunMeta = {
                                 loading: false,
@@ -290,7 +309,6 @@
                         }
                         window.step5SelectedObservation = 0;
                         renderObservationTable();
-                        console.log("[Dashboard] Moving to Step 5: Validate updated flow");
                         } else {
                         document.getElementById('liveValidationCount').style.borderColor = 'red';
                         }

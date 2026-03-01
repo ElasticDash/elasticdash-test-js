@@ -407,23 +407,129 @@ function buildValidationObservations(
   return observations
 }
 
+async function wrapToolsForTracing(cwd: string, trace: ReturnType<typeof startTraceSession>['context']['trace']): Promise<Record<string, Function>> {
+  const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools')
+  console.log('[elasticdash] wrapToolsForTracing: toolsModulePath =', toolsModulePath)
+  if (!toolsModulePath) {
+    console.log('[elasticdash] No ed_tools found, returning empty tools')
+    return {}
+  }
+
+  try {
+    // Ensure TypeScript runtime is available
+    if (/\.tsx?$/.test(toolsModulePath)) {
+      console.log('[elasticdash] Ensuring TSX runtime for tools')
+      await ensureTsxRuntime()
+    }
+
+    // Use dynamic import instead of require for proper ESM/TypeScript support
+    console.log('[elasticdash] Importing tools module:', toolsModulePath)
+    const toolsModule = await import(pathToFileURL(toolsModulePath).href)
+    console.log('[elasticdash] Tools module loaded, exports:', Object.keys(toolsModule))
+    const wrappedTools: Record<string, Function> = {}
+
+    for (const [name, fn] of Object.entries(toolsModule)) {
+      if (typeof fn === 'function') {
+        console.log('[elasticdash] Wrapping tool function:', name)
+        wrappedTools[name] = new Proxy(fn, {
+          apply(target, thisArg, args) {
+            const startTime = Date.now()
+            console.log('[elasticdash] Tool "' + name + '" called with args:', args)
+            try {
+              const result = Reflect.apply(target, thisArg, args)
+              
+              // Handle both sync and async functions
+              if (result && typeof result.then === 'function') {
+                return result.then((actualResult: unknown) => {
+                  console.log('[elasticdash] Tool "' + name + '" async result:', actualResult)
+                  trace.recordToolCall({
+                    name,
+                    args: args.length === 1 ? args[0] : args,
+                    result: actualResult,
+                  })
+                  return actualResult
+                }).catch((error: unknown) => {
+                  console.error('[elasticdash] Tool \"' + name + '\" async error:', error)
+                  trace.recordToolCall({
+                    name,
+                    args: args.length === 1 ? args[0] : args,
+                    result: { error: formatError(error) },
+                  })
+                  throw error
+                })
+              }
+              
+              // Sync function
+              console.log('[elasticdash] Tool "' + name + '" sync result:', result)
+              trace.recordToolCall({
+                name,
+                args: args.length === 1 ? args[0] : args,
+                result,
+              })
+              return result
+            } catch (error) {
+              console.error('[elasticdash] Tool "' + name + '" error:', error)
+              trace.recordToolCall({
+                name,
+                args: args.length === 1 ? args[0] : args,
+                result: { error: formatError(error) },
+              })
+              throw error
+            }
+          },
+        })
+      }
+    }
+    
+    console.log('[elasticdash] Tool wrapping complete. Wrapped tools:', Object.keys(wrappedTools))
+    return wrappedTools
+  } catch (error) {
+    console.error('[elasticdash] Failed to wrap tools:', error)
+    console.error('[elasticdash] Error stack:', (error as Error).stack)
+    return {}
+  }
+}
+
 async function runWorkflowValidation(
+  cwd: string,
   workflowName: string,
   workflowFn: (...args: unknown[]) => unknown,
   workflowArgs: unknown[],
   runNumber: number,
 ): Promise<ValidationRunTrace> {
+  console.log('[elasticdash] === Run ' + runNumber + ': Starting workflow "' + workflowName + '" ===')
+  console.log('[elasticdash] Workflow args:', workflowArgs)
+  
   const { context, finalise } = startTraceSession()
   setCurrentTrace(context.trace)
 
+  // Inject wrapped tools into global scope for workflow access
+  console.log('[elasticdash] Wrapping tools for tracing...')
+  const wrappedTools = await wrapToolsForTracing(cwd, context.trace)
+  console.log('[elasticdash] Tools to inject into global:', Object.keys(wrappedTools))
+  const globals = global as any
+  const originalTools: Record<string, unknown> = {}
+  
+  for (const [name, fn] of Object.entries(wrappedTools)) {
+    originalTools[name] = globals[name]
+    globals[name] = fn
+    console.log('[elasticdash] Injected tool "' + name + '" into global scope')
+  }
+
   try {
+    console.log('[elasticdash] Executing workflow function...')
     const output = await workflowFn(...workflowArgs)
+    console.log('[elasticdash] Workflow execution completed successfully. Output:', output)
+    const observations = buildValidationObservations(workflowName, output, undefined, context.trace)
+    console.log('[elasticdash] Run ' + runNumber + ': Generated ' + observations.length + ' observations')
     return {
       runNumber,
       ok: true,
-      observations: buildValidationObservations(workflowName, output, undefined, context.trace),
+      observations,
     }
   } catch (error) {
+    console.error('[elasticdash] Run ' + runNumber + ': Workflow execution failed:', error)
+    console.error('[elasticdash] Error stack:', (error as Error).stack)
     const formatted = formatError(error)
     return {
       runNumber,
@@ -432,8 +538,18 @@ async function runWorkflowValidation(
       observations: buildValidationObservations(workflowName, undefined, formatted, context.trace),
     }
   } finally {
+    // Restore original global state
+    console.log('[elasticdash] Cleaning up: restoring original global state')
+    for (const [name, originalValue] of Object.entries(originalTools)) {
+      if (originalValue === undefined) {
+        delete globals[name]
+      } else {
+        globals[name] = originalValue
+      }
+    }
     setCurrentTrace(undefined)
     finalise()
+    console.log('[elasticdash] === Run ' + runNumber + ': Complete ===')
   }
 }
 
@@ -497,13 +613,17 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
       const runs = Array.from({ length: runCount }, (_, i) => i + 1)
       let traces: ValidationRunTrace[] = []
 
+      console.log(`[elasticdash] Running workflow "${workflowName}" ${runCount} time(s) in ${mode} mode with args:`, workflowArgs)
+      
       if (sequential) {
         for (const runNumber of runs) {
-          traces.push(await runWorkflowValidation(workflowName, workflowFn, workflowArgs, runNumber))
+          traces.push(await runWorkflowValidation(cwd, workflowName, workflowFn, workflowArgs, runNumber))
         }
       } else {
-        traces = await Promise.all(runs.map(runNumber => runWorkflowValidation(workflowName, workflowFn, workflowArgs, runNumber)))
+        traces = await Promise.all(runs.map(runNumber => runWorkflowValidation(cwd, workflowName, workflowFn, workflowArgs, runNumber)))
       }
+      
+      console.log(`[elasticdash] Completed ${traces.length} workflow run(s). Success: ${traces.filter(t => t.ok).length}, Failed: ${traces.filter(t => !t.ok).length}`)
 
       return {
         ok: true,
@@ -515,6 +635,8 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
       uninstallAIInterceptor()
     }
   } catch (error) {
+    console.error('[elasticdash] Workflow validation failed with exception:', error)
+    console.error('[elasticdash] Error stack:', (error as Error).stack)
     return {
       ok: false,
       mode,
