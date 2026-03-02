@@ -5,6 +5,7 @@ const AI_PATTERNS: Record<string, RegExp> = {
   openai: /https?:\/\/api\.openai\.com\/v1\/(chat\/)?completions/,
   gemini: /https?:\/\/generativelanguage\.googleapis\.com\/.*\/models\/[^/:]+:(generateContent|streamGenerateContent)/,
   grok:   /https?:\/\/api\.x\.ai\/v1\/(chat\/)?completions/,
+  kimi:   /https?:\/\/api\.moonshot\.ai\/v1\/(chat\/)?completions/,
 }
 
 /** Detect which provider (if any) a URL belongs to */
@@ -27,7 +28,7 @@ function extractModel(provider: string, body: Record<string, unknown>, url: stri
 
 /** Extract prompt text from request body */
 function extractPrompt(provider: string, body: Record<string, unknown>): string {
-  if (provider === 'openai' || provider === 'grok') {
+  if (provider === 'openai' || provider === 'grok' || provider === 'kimi') {
     const messages = body.messages
     if (Array.isArray(messages)) {
       return messages
@@ -71,7 +72,7 @@ function extractPrompt(provider: string, body: Record<string, unknown>): string 
 
 /** Extract completion text from response body */
 function extractCompletion(provider: string, responseBody: Record<string, unknown>): string {
-  if (provider === 'openai' || provider === 'grok') {
+  if (provider === 'openai' || provider === 'grok' || provider === 'kimi') {
     const choices = responseBody.choices
     if (Array.isArray(choices) && choices.length > 0) {
       const first = choices[0] as Record<string, unknown>

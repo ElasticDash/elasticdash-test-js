@@ -43,6 +43,7 @@
             .trace-viewer.visible { display: block; }
             .trace-layout { display: grid; grid-template-columns: 40% calc(60% - 16px); gap: 16px; min-height: 420px; }
             .trace-layout.step-5 { display: grid; grid-template-columns: calc(30% - 16px) calc(30% - 16px) 40%; gap: 16px; min-height: 420px; }
+            .trace-layout.step-4 { display: grid; grid-template-columns: calc(30% - 16px) calc(30% - 16px) 40%; gap: 16px; min-height: 420px; }
             .trace-left, .trace-right { background: #f9f9f9; border-radius: 8px; padding: 14px; border: 1px solid #eee; }
             .trace-section-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
             .observation-table-wrap { max-height: 460px; overflow: auto; background: white; border-radius: 6px; border: 1px solid #eee; }
@@ -105,8 +106,7 @@
                     <button class="modal-close" id="closeModal">&times;</button>
                 </div>
                 <div id="uploadArea" class="upload-area">
-                    <div class="upload-icon">📤</div>
-                    <div>Drop trace file here or click to select</div>
+                    <div>Drag and Drop <br />or <br />Click to Upload</div>
                     <input type="file" id="traceFile" accept=".json" />
                 </div>
                 <div id="uploadStatus" class="upload-status"></div>
@@ -136,8 +136,9 @@
             console.log("[Dashboard] Script starting...");
             let allWorkflows = [], codeIndex = {workflows: [], tools: []}, selectedWorkflow = null;
             let currentObservations = [], selectedObservationIndex = -1;
-            let rerunOutputs = new Map();
+            let rerunHistory = new Map();
             let rerunInFlight = new Set();
+            let step4SelectedRun = -1;
             let step5RunTraces = [];
             let step5RunMeta = { loading: false, error: '', runCount: 0, sequential: false };
             const tbody = document.getElementById("workflowsTableBody");
@@ -208,7 +209,7 @@
                         <div style="background:white;padding:32px 28px;border-radius:12px;box-shadow:0 2px 24px #0002;min-width:340px;max-width:90vw;">
                         <h3 style="margin-top:0;margin-bottom:18px;font-size:20px;">Validate Updated Flow with Live Data</h3>
                         <label style="font-size:15px;display:block;margin-bottom:8px;">How many times do you want to run the flow with live data?</label>
-                        <input id="liveValidationCount" type="number" min="1" value="1" style="width:80px;font-size:16px;padding:6px 10px;margin-bottom:18px;" />
+                        <input id="liveValidationCount" type="number" min="1" value="1" style="width:100%;font-size:16px;padding:6px 10px;margin-bottom:18px;" />
                         <label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:18px;">
                             <input id="liveValidationSequential" type="checkbox" />
                             Run in sequence instead of parallel
@@ -521,15 +522,106 @@
                 `;
                 return;
                 }
-                
+
+                if (currentStep === 4) {
+                const traceLayout = document.getElementsByClassName("trace-layout")[0];
+                traceLayout.classList.remove("step-5");
+                traceLayout.classList.add("step-4");
+                const obsIndices = Array.from(checkedObservations);
+
+                // Column 1: Steps (observation list)
+                let col1 = `<div class="trace-section-title">Steps</div>
+                    <div class="observation-table-wrap">
+                    <table class="observation-table">
+                    <thead><tr><th>Name</th><th>Type</th></tr></thead>
+                    <tbody>`;
+                col1 += obsIndices.map(idx => {
+                    const obs = currentObservations[idx];
+                    const isSelected = idx === selectedObservationIndex;
+                    const name = obs.name || obs.id || ('Observation ' + (idx + 1));
+                    const type = obs.type || 'UNKNOWN';
+                    const typeClass = type === 'TOOL' ? 'tool' : 'ai';
+                    const history = rerunHistory.get(idx) || [];
+                    const latest = history[history.length - 1];
+                    const badge = latest
+                        ? (latest.running ? ' <span class="rerun-status running">⟳</span>'
+                            : latest.ok ? ' <span class="rerun-status success">✓</span>'
+                            : ' <span class="rerun-status error">✗</span>')
+                        : '';
+                    return `<tr class="${isSelected ? 'selected' : ''}" onclick="window.step4SelectObservation(${idx})"><td>${esc(name)}${badge}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
+                }).join('');
+                col1 += `</tbody></table></div>`;
+
+                // Column 2: Runs for the selected observation
+                const inFlight = selectedObservationIndex >= 0 && rerunInFlight.has(selectedObservationIndex);
+                let col2 = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                    <div class="trace-section-title" style="margin-bottom:0">Runs</div>
+                    ${selectedObservationIndex >= 0 ? `<button class="btn btn-primary" style="padding:4px 12px;font-size:12px;" onclick="rerunObservation(${selectedObservationIndex})" ${inFlight ? 'disabled' : ''}>${inFlight ? 'Running...' : 'Rerun'}</button>` : ''}
+                </div>`;
+                if (selectedObservationIndex >= 0) {
+                    const history = rerunHistory.get(selectedObservationIndex) || [];
+                    if (history.length === 0) {
+                        col2 += `<div style="color:#999;font-size:13px;padding:8px;">No runs yet. Click Rerun to start.</div>`;
+                    } else {
+                        col2 += `<div class="observation-table-wrap"><table class="observation-table"><thead><tr><th>Run</th><th>Status</th></tr></thead><tbody>`;
+                        col2 += history.map((run, ri) => {
+                            const isSelRun = ri === step4SelectedRun;
+                            const status = run.running ? '⟳ Running' : (run.ok ? '✓ Success' : '✗ Failed');
+                            return `<tr class="${isSelRun ? 'selected' : ''}" onclick="window.step4SelectRun(${ri})"><td>Run ${run.runNumber}</td><td>${status}</td></tr>`;
+                        }).join('');
+                        col2 += `</tbody></table></div>`;
+                    }
+                } else {
+                    col2 += `<div style="color:#999;font-size:13px;padding:8px;">Select a step to view runs.</div>`;
+                }
+
+                // Column 3: Details for the selected run
+                let col3 = '';
+                if (selectedObservationIndex >= 0) {
+                    const obs = currentObservations[selectedObservationIndex];
+                    const history = rerunHistory.get(selectedObservationIndex) || [];
+                    const run = step4SelectedRun >= 0 ? history[step4SelectedRun] : null;
+                    const inputText = toDisplayText(obs.input, obs.type);
+                    const outputText = toDisplayText(obs.output, obs.type);
+                    const detailId = 'step4-detail-' + selectedObservationIndex + '-' + step4SelectedRun;
+                    const filePathHtml = obs.type === "GENERATION"
+                        ? '<div class="file-path-placeholder"></div>'
+                        : renderFilePath(getObsFilePath(obs));
+                    let currentOutputSection = '';
+                    if (run) {
+                        if (run.running) {
+                            currentOutputSection = `<div class="detail-section"><div class="detail-title">Current Output</div><pre class="detail-pre">Running...</pre></div>`;
+                        } else if (run.ok) {
+                            currentOutputSection = `<div class="detail-section"><div class="detail-title">Current Output</div><pre class="detail-pre">${esc(toDisplayText(run.output, obs.type))}</pre></div>`;
+                        } else {
+                            currentOutputSection = `<div class="detail-section"><div class="detail-title">Current Output</div><pre class="detail-pre">Rerun failed: ${esc(run.error || 'Unknown error')}</pre></div>`;
+                        }
+                    }
+                    col3 = `<div class="detail-sections" id="${detailId}">
+                        ${filePathHtml}
+                        ${renderModel(obs)}
+                        <div class="detail-section"><div class="detail-title">Input</div><pre class="detail-pre">${esc(inputText)}</pre></div>
+                        <div class="detail-section"><div class="detail-title">Output</div><pre class="detail-pre">${esc(outputText)}</pre></div>
+                        ${currentOutputSection}
+                    </div>`;
+                    if (obs.type === "GENERATION") setTimeout(() => resolveGenFilePath(obs, detailId), 0);
+                }
+
+                traceLayout.innerHTML = `
+                    <div class="trace-left">${col1}</div>
+                    <div class="trace-left">${col2}</div>
+                    <div class="trace-right">${col3}</div>
+                `;
+                return;
+                }
+
                 const traceLayoutEl = document.getElementsByClassName("trace-layout")[0];
-                if (traceLayoutEl.classList.contains("step-5")) {
+                if (traceLayoutEl.classList.contains("step-5") || traceLayoutEl.classList.contains("step-4")) {
                 traceLayoutEl.classList.remove("step-5");
+                traceLayoutEl.classList.remove("step-4");
                 let headerHtml = '';
                 if (currentStep === 3) {
                     headerHtml = '<tr><th style="width: 40px;">Check</th><th>Name</th><th>Type</th></tr>';
-                } else if (currentStep === 4) {
-                    headerHtml = '<tr><th style="width: 65%;">Name</th><th>Type</th><th>Action</th></tr>';
                 }
                 traceLayoutEl.innerHTML = `
                     <div class="trace-left">
@@ -549,9 +641,9 @@
                 observationDetail = document.getElementById("observationDetail");
                 }
 
-                const obsToRender = currentStep === 4 ? Array.from(checkedObservations).map(idx => currentObservations[idx]) : currentObservations;
-                const indices = currentStep === 4 ? Array.from(checkedObservations) : currentObservations.map((_, i) => i);
-                
+                const obsToRender = currentObservations;
+                const indices = currentObservations.map((_, i) => i);
+
                 if (!obsToRender.length) {
                 observationTableBody.innerHTML = '<tr><td colspan="3" style="padding: 16px; color: #777;">No observations found.</td></tr>';
                 return;
@@ -564,28 +656,14 @@
                 const name = obs.name || obs.id || ("Observation " + (displayIndex + 1));
                 const type = obs.type || "UNKNOWN";
                 const typeClass = type === "TOOL" ? "tool" : "ai";
-                
-                if (currentStep === 3) {
-                    // Step 3: Mark broken - show checkboxes
-                    return `<tr class="${isSelected ? "selected" : ""}">
+                // Step 3: Mark broken - show checkboxes
+                return `<tr class="${isSelected ? "selected" : ""}">
                     <td style="width: 40px;"><input type="checkbox" class="obs-checkbox" value="${actualIndex}" ${isChecked ? "checked" : ""}></td>
                     <td onclick="selectObservation(${actualIndex})">${esc(name)}</td>
                     <td><span class="obs-type ${typeClass}">${esc(type)}</span></td>
                     </tr>`;
-                } else if (currentStep === 4) {
-                    // Step 4: Verify - show rerun button in Action column
-                    const isRunning = rerunInFlight.has(actualIndex);
-                    const statusBadge = renderRerunStatusBadge(actualIndex);
-                    return `<tr class="${isSelected ? "selected" : ""}">
-                    <td onclick="selectObservation(${actualIndex})">${esc(name)}</td>
-                    <td><span class="obs-type ${typeClass}">${esc(type)}</span></td>
-                    <td><button class="btn btn-primary rerun-btn" data-index="${actualIndex}" ${isRunning ? "disabled" : ""}>${isRunning ? "Running..." : "Rerun"}</button>${statusBadge}</td>
-                    </tr>`;
-                }
                 }).join("");
-                
-                // Add checkbox event listeners for Step 3
-                if (currentStep === 3) {
+
                 document.querySelectorAll(".obs-checkbox").forEach(checkbox => {
                     checkbox.onchange = (e) => {
                     const idx = parseInt(e.target.value);
@@ -596,16 +674,6 @@
                     }
                     };
                 });
-                } else if (currentStep === 4) {
-                document.querySelectorAll(".rerun-btn").forEach(btn => {
-                    btn.onclick = async (e) => {
-                    e.stopPropagation();
-                    const idx = parseInt(btn.getAttribute("data-index"), 10);
-                    if (!Number.isFinite(idx)) return;
-                    await rerunObservation(idx);
-                    };
-                });
-                }
             }
 
             function selectObservation(index) {
@@ -630,69 +698,45 @@
                     <div class="detail-title">Output</div>
                     <pre class="detail-pre">${esc(outputText)}</pre>
                 </div>
-                ${renderCurrentOutputSection(index, obs)}
                 </div>`;
                 if (obs.type === "GENERATION") resolveGenFilePath(obs, detailId);
             }
 
             async function rerunObservation(index) {
                 const obs = currentObservations[index];
-                if (!obs) {
-                return;
-                }
-
+                if (!obs) return;
+                const history = rerunHistory.get(index) || [];
+                const newRun = { runNumber: history.length + 1, running: true, ok: null };
+                history.push(newRun);
+                rerunHistory.set(index, history);
                 rerunInFlight.add(index);
-                renderObservationTable();
-
-                try {
-                const response = await fetch('/api/rerun-observation', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ observation: obs }),
-                });
-                const data = await response.json();
-                if (response.ok && data.ok) {
-                    rerunOutputs.set(index, { ok: true, output: data.currentOutput });
-                } else {
-                    rerunOutputs.set(index, { ok: false, error: data.error || 'Rerun failed.' });
-                }
-                } catch (err) {
-                rerunOutputs.set(index, {
-                    ok: false,
-                    error: err && err.message ? err.message : String(err),
-                });
-                } finally {
-                rerunInFlight.delete(index);
                 if (selectedObservationIndex === index) {
-                    selectObservation(index);
-                } else {
+                    step4SelectedRun = history.length - 1;
+                }
+                renderObservationTable();
+                try {
+                    const response = await fetch('/api/rerun-observation', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ observation: obs }),
+                    });
+                    const data = await response.json();
+                    newRun.running = false;
+                    if (response.ok && data.ok) {
+                        newRun.ok = true;
+                        newRun.output = data.currentOutput;
+                    } else {
+                        newRun.ok = false;
+                        newRun.error = data.error || 'Rerun failed.';
+                    }
+                } catch (err) {
+                    newRun.running = false;
+                    newRun.ok = false;
+                    newRun.error = err && err.message ? err.message : String(err);
+                } finally {
+                    rerunInFlight.delete(index);
                     renderObservationTable();
                 }
-                }
-            }
-
-            function renderCurrentOutputSection(index, obs) {
-                const rerun = rerunOutputs.get(index);
-                if (!rerun) return '';
-                const text = rerun.ok
-                ? toDisplayText(rerun.output, obs?.type)
-                : `Rerun failed: ${rerun.error || 'Unknown error'}`;
-                return `<div class="detail-section">
-                <div class="detail-title">Current Output</div>
-                <pre class="detail-pre">${esc(text)}</pre>
-                </div>`;
-            }
-
-            function renderRerunStatusBadge(index) {
-                if (rerunInFlight.has(index)) {
-                return '<span class="rerun-status running">Running…</span>';
-                }
-                const rerun = rerunOutputs.get(index);
-                if (!rerun) return '';
-                if (rerun.ok) {
-                return '<span class="rerun-status success">Succeeded</span>';
-                }
-                return '<span class="rerun-status error">Failed</span>';
             }
 
             function getObsFilePath(obs) {
@@ -849,8 +893,9 @@
                 currentObservations = [];
                 selectedObservationIndex = -1;
                 checkedObservations.clear();
-                rerunOutputs.clear();
+                rerunHistory.clear();
                 rerunInFlight.clear();
+                step4SelectedRun = -1;
                 step5RunTraces = [];
                 step5RunMeta = { loading: false, error: '', runCount: 0, sequential: false };
                 observationTableBody.innerHTML = "";
@@ -861,12 +906,12 @@
             
             function updateModalTitle() {
                 const titles = {
-                0: "Import Trace for Analysis",
-                3: "Step 3: Mark broken step",
-                4: "Step 4: Verify your fix",
-                5: "Step 5: Validate updated flow with live data"
+                    0: "Step 2: Import Failed Trace",
+                    3: "Step 3: Mark broken step",
+                    4: "Step 4: Verify your fix",
+                    5: "Step 5: Validate updated flow with live data"
                 };
-                modalTitle.textContent = titles[currentStep] || "Import Trace for Analysis";
+                modalTitle.textContent = titles[currentStep] || "Step 2: Import Failed Trace";
             }
             
             function updateFooterButtons() {
@@ -935,6 +980,16 @@
             
             window.showModal = showModal;
             window.selectObservation = selectObservation;
+            window.step4SelectObservation = function(idx) {
+                selectedObservationIndex = idx;
+                const history = rerunHistory.get(idx) || [];
+                step4SelectedRun = history.length > 0 ? history.length - 1 : -1;
+                renderObservationTable();
+            };
+            window.step4SelectRun = function(ri) {
+                step4SelectedRun = ri;
+                renderObservationTable();
+            };
             function esc(t) { const d = document.createElement("div"); d.textContent = t; return d.innerHTML; }
             window.esc = esc;
             
