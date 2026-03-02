@@ -2,10 +2,14 @@ import http from 'node:http'
 import path from 'node:path'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'url'
 import { callProviderLLM } from './matchers/index.js'
 import { startTraceSession, setCurrentTrace } from './trace-adapter/context.js'
 import { installAIInterceptor, uninstallAIInterceptor } from './interceptors/ai-interceptor.js'
+import chokidar from 'chokidar';
+import express from 'express';
+import { Worker } from 'worker_threads';
+const app = express();
 
 export interface WorkflowInfo {
   name: string
@@ -94,14 +98,6 @@ interface ValidateWorkflowResult {
   error?: string
 }
 
-let tsxRuntimeRegistered = false
-
-async function ensureTsxRuntime(): Promise<void> {
-  if (tsxRuntimeRegistered) return
-  await import('tsx/esm')
-  await import('tsx/cjs')
-  tsxRuntimeRegistered = true
-}
 
 function resolveRuntimeModule(cwd: string, baseName: string): string | null {
   for (const ext of ['.ts', '.tsx', '.js', '.jsx']) {
@@ -232,6 +228,175 @@ function formatError(error: unknown): string {
   }
 }
 
+function runToolInSubprocess(
+  toolsModulePath: string,
+  toolName: string,
+  args: unknown[],
+): Promise<RerunResult> {
+  return new Promise((resolve) => {
+    const workerScript = new URL('./tool-runner-worker.js', import.meta.url).pathname
+
+    // Forward NODE_OPTIONS so tsx/esm transpiles TypeScript in the child process
+    const nodeOptions = process.env.NODE_OPTIONS ?? ''
+    const childEnv = { ...process.env, NODE_OPTIONS: nodeOptions }
+
+    const child = spawn(process.execPath, [workerScript], {
+      env: childEnv,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+
+    const RESULT_PREFIX = '__ELASTICDASH_RESULT__:'
+    let resultLine = ''
+    let stderr = ''
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      const text = chunk.toString()
+      for (const line of text.split('\n')) {
+        if (line.startsWith(RESULT_PREFIX)) {
+          resultLine = line.slice(RESULT_PREFIX.length)
+        } else if (line) {
+          process.stdout.write(line + '\n')
+        }
+      }
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+      process.stderr.write(chunk)
+    })
+
+    child.on('close', () => {
+      if (resultLine) {
+        try {
+          resolve(JSON.parse(resultLine) as RerunResult)
+          return
+        } catch { /* fall through */ }
+      }
+      resolve({ ok: false, error: stderr.trim() || 'Tool subprocess produced no output.' })
+    })
+
+    child.on('error', (err) => {
+      resolve({ ok: false, error: `Failed to spawn tool subprocess: ${err.message}` })
+    })
+
+    const payload = JSON.stringify({ toolsModulePath, toolName, args })
+    child.stdin.write(payload)
+    child.stdin.end()
+  })
+}
+
+interface WorkflowSubprocessResult {
+  ok: boolean
+  currentOutput?: unknown
+  steps?: unknown[]
+  llmSteps?: unknown[]
+  toolCalls?: unknown[]
+  customSteps?: unknown[]
+  error?: string
+}
+
+import type { TraceHandle } from './trace-adapter/context.js'
+
+async function loadAndWrapToolsForProcess(
+  toolsModulePath: string,
+  trace: TraceHandle,
+): Promise<Record<string, (...a: unknown[]) => unknown>> {
+  try {
+    const toolsMod = await import(`${toolsModulePath}?v=${Date.now()}`)
+    const wrapped: Record<string, (...a: unknown[]) => unknown> = {}
+    for (const [name, fn] of Object.entries(toolsMod)) {
+      if (typeof fn !== 'function') continue
+      wrapped[name] = new Proxy(fn as (...a: unknown[]) => unknown, {
+        apply(target, thisArg, args) {
+          const result = Reflect.apply(target, thisArg, args)
+          if (result && typeof (result as Promise<unknown>).then === 'function') {
+            return (result as Promise<unknown>).then((v: unknown) => {
+              trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result: v })
+              return v
+            }).catch((e: unknown) => {
+              trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result: { error: String(e) } })
+              throw e
+            })
+          }
+          trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result })
+          return result
+        },
+      })
+    }
+    return wrapped
+  } catch {
+    return {}
+  }
+}
+
+async function runWorkflowInProcess(
+  workflowsModulePath: string,
+  toolsModulePath: string | null,
+  workflowName: string,
+  args: unknown[],
+  input: unknown,
+): Promise<WorkflowSubprocessResult> {
+  const { context, finalise } = startTraceSession()
+  setCurrentTrace(context.trace)
+
+  const globals = global as Record<string, unknown>
+  const originalValues: Record<string, unknown> = {}
+
+  if (toolsModulePath) {
+    const wrappedTools = await loadAndWrapToolsForProcess(toolsModulePath, context.trace)
+    for (const [name, fn] of Object.entries(wrappedTools)) {
+      originalValues[name] = globals[name]
+      globals[name] = fn
+    }
+  }
+
+  const originalExit = process.exit.bind(process)
+  ;(process as NodeJS.Process).exit = (() => undefined) as typeof process.exit
+
+  let currentOutput: unknown
+  let workflowError: Error | undefined
+
+  try {
+    const workflowsMod = await import(`${workflowsModulePath}?v=${Date.now()}`)
+    const workflowFn = workflowsMod[workflowName]
+    if (typeof workflowFn !== 'function') {
+      return { ok: false, error: `"${workflowName}" is not an exported function in the workflow module.` }
+    }
+
+    installAIInterceptor()
+    try {
+      const callArgs = args.length > 0 ? args : input !== null && input !== undefined ? [input] : []
+      currentOutput = await (workflowFn as (...a: unknown[]) => unknown)(...callArgs)
+    } finally {
+      uninstallAIInterceptor()
+    }
+  } catch (e) {
+    workflowError = e instanceof Error ? e : new Error(String(e))
+  } finally {
+    ;(process as NodeJS.Process).exit = originalExit
+    for (const [name, original] of Object.entries(originalValues)) {
+      if (original === undefined) {
+        delete globals[name]
+      } else {
+        globals[name] = original
+      }
+    }
+    setCurrentTrace(undefined)
+    finalise()
+  }
+
+  const traceData = {
+    steps: context.trace.getSteps(),
+    llmSteps: context.trace.getLLMSteps(),
+    toolCalls: context.trace.getToolCalls(),
+    customSteps: context.trace.getCustomSteps(),
+  }
+
+  if (workflowError) {
+    return { ok: false, error: workflowError.message ?? String(workflowError), ...traceData }
+  }
+  return { ok: true, currentOutput, ...traceData }
+}
+
 async function runToolObservation(cwd: string, observation: DashboardObservation, tools: ToolInfo[]): Promise<RerunResult> {
   const toolName = observation.name
   if (!toolName) {
@@ -243,33 +408,23 @@ async function runToolObservation(cwd: string, observation: DashboardObservation
     return { ok: false, error: 'Cannot find ed_tools.ts/js in workspace root.' }
   }
 
-  try {
-    if (/\.tsx?$/.test(toolsModulePath)) {
-      await ensureTsxRuntime()
+  // Parse input if it's a JSON string (common in trace exports)
+  let parsedInput = observation.input
+  if (typeof parsedInput === 'string') {
+    try {
+      parsedInput = JSON.parse(parsedInput)
+    } catch {
+      // Not JSON, use as-is
     }
-    const mod = await import(pathToFileURL(toolsModulePath).href)
-    const fn = mod[toolName]
-    if (typeof fn !== 'function') {
-      return { ok: false, error: `Tool "${toolName}" is not an exported function in ${path.basename(toolsModulePath)}.` }
-    }
-    
-    // Parse input if it's a JSON string (common in trace exports)
-    let parsedInput = observation.input
-    if (typeof parsedInput === 'string') {
-      try {
-        parsedInput = JSON.parse(parsedInput)
-      } catch {
-        // Not JSON, use as-is
-      }
-    }
-    
-    const toolInfo = tools.find(tool => tool.name === toolName)
-    const args = buildToolArgs(parsedInput, toolInfo)
-    const output = await fn(...args)
-    return { ok: true, currentOutput: output }
-  } catch (error) {
-    return { ok: false, error: `Tool rerun failed: ${formatError(error)}` }
   }
+
+  const toolInfo = tools.find(tool => tool.name === toolName)
+  const args = buildToolArgs(parsedInput, toolInfo)
+
+  console.log('[elasticdash] Rerunning tool observation:', { toolName, input: observation.input })
+  console.log(`[elasticdash] Loading tools from ${toolsModulePath} (fresh subprocess)...`)
+
+  return runToolInSubprocess(toolsModulePath, toolName, args)
 }
 
 async function runGenerationObservation(observation: DashboardObservation): Promise<RerunResult> {
@@ -540,151 +695,7 @@ function buildValidationObservations(
   return observations
 }
 
-async function wrapToolsForTracing(cwd: string, trace: ReturnType<typeof startTraceSession>['context']['trace']): Promise<Record<string, Function>> {
-  const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools')
-  console.log('[elasticdash] wrapToolsForTracing: toolsModulePath =', toolsModulePath)
-  if (!toolsModulePath) {
-    console.log('[elasticdash] No ed_tools found, returning empty tools')
-    return {}
-  }
 
-  try {
-    // Ensure TypeScript runtime is available
-    if (/\.tsx?$/.test(toolsModulePath)) {
-      console.log('[elasticdash] Ensuring TSX runtime for tools')
-      await ensureTsxRuntime()
-    }
-
-    // Use dynamic import instead of require for proper ESM/TypeScript support
-    console.log('[elasticdash] Importing tools module:', toolsModulePath)
-    const toolsModule = await import(pathToFileURL(toolsModulePath).href)
-    console.log('[elasticdash] Tools module loaded, exports:', Object.keys(toolsModule))
-    const wrappedTools: Record<string, Function> = {}
-
-    for (const [name, fn] of Object.entries(toolsModule)) {
-      if (typeof fn === 'function') {
-        console.log('[elasticdash] Wrapping tool function:', name)
-        wrappedTools[name] = new Proxy(fn, {
-          apply(target, thisArg, args) {
-            console.log('[elasticdash] Tool "' + name + '" called with args:', args)
-            try {
-              const result = Reflect.apply(target, thisArg, args)
-              
-              // Handle both sync and async functions
-              if (result && typeof result.then === 'function') {
-                return result.then((actualResult: unknown) => {
-                  console.log('[elasticdash] Tool "' + name + '" async result:', actualResult)
-                  trace.recordToolCall({
-                    name,
-                    args: args.length === 1 ? args[0] : args,
-                    result: actualResult,
-                  })
-                  return actualResult
-                }).catch((error: unknown) => {
-                  console.error('[elasticdash] Tool \"' + name + '\" async error:', error)
-                  trace.recordToolCall({
-                    name,
-                    args: args.length === 1 ? args[0] : args,
-                    result: { error: formatError(error) },
-                  })
-                  throw error
-                })
-              }
-              
-              // Sync function
-              console.log('[elasticdash] Tool "' + name + '" sync result:', result)
-              trace.recordToolCall({
-                name,
-                args: args.length === 1 ? args[0] : args,
-                result,
-              })
-              return result
-            } catch (error) {
-              console.error('[elasticdash] Tool "' + name + '" error:', error)
-              trace.recordToolCall({
-                name,
-                args: args.length === 1 ? args[0] : args,
-                result: { error: formatError(error) },
-              })
-              throw error
-            }
-          },
-        })
-      }
-    }
-    
-    console.log('[elasticdash] Tool wrapping complete. Wrapped tools:', Object.keys(wrappedTools))
-    return wrappedTools
-  } catch (error) {
-    console.error('[elasticdash] Failed to wrap tools:', error)
-    console.error('[elasticdash] Error stack:', (error as Error).stack)
-    return {}
-  }
-}
-
-async function runWorkflowValidation(
-  cwd: string,
-  workflowName: string,
-  workflowFn: (...args: unknown[]) => unknown,
-  workflowArgs: unknown[],
-  workflowInput: unknown,
-  runNumber: number,
-): Promise<ValidationRunTrace> {
-  console.log('[elasticdash] === Run ' + runNumber + ': Starting workflow "' + workflowName + '" ===')
-  console.log('[elasticdash] Workflow args:', workflowArgs)
-  
-  const { context, finalise } = startTraceSession()
-  setCurrentTrace(context.trace)
-
-  // Inject wrapped tools into global scope for workflow access
-  console.log('[elasticdash] Wrapping tools for tracing...')
-  const wrappedTools = await wrapToolsForTracing(cwd, context.trace)
-  console.log('[elasticdash] Tools to inject into global:', Object.keys(wrappedTools))
-  const globals = global as any
-  const originalTools: Record<string, unknown> = {}
-  
-  for (const [name, fn] of Object.entries(wrappedTools)) {
-    originalTools[name] = globals[name]
-    globals[name] = fn
-    console.log('[elasticdash] Injected tool "' + name + '" into global scope')
-  }
-
-  try {
-    console.log('[elasticdash] Executing workflow function...')
-    const output = await workflowFn(...workflowArgs)
-    console.log('[elasticdash] Workflow execution completed successfully. Output:', output)
-    const observations = buildValidationObservations(workflowName, workflowInput, output, undefined, context.trace)
-    console.log('[elasticdash] Run ' + runNumber + ': Generated ' + observations.length + ' observations')
-    return {
-      runNumber,
-      ok: true,
-      observations,
-    }
-  } catch (error) {
-    console.error('[elasticdash] Run ' + runNumber + ': Workflow execution failed:', error)
-    console.error('[elasticdash] Error stack:', (error as Error).stack)
-    const formatted = formatError(error)
-    return {
-      runNumber,
-      ok: false,
-      error: formatted,
-      observations: buildValidationObservations(workflowName, workflowInput, undefined, formatted, context.trace),
-    }
-  } finally {
-    // Restore original global state
-    console.log('[elasticdash] Cleaning up: restoring original global state')
-    for (const [name, originalValue] of Object.entries(originalTools)) {
-      if (originalValue === undefined) {
-        delete globals[name]
-      } else {
-        globals[name] = originalValue
-      }
-    }
-    setCurrentTrace(undefined)
-    finalise()
-    console.log('[elasticdash] === Run ' + runNumber + ': Complete ===')
-  }
-}
 
 async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): Promise<ValidateWorkflowResult> {
   const workflowName = typeof body.workflowName === 'string' ? body.workflowName.trim() : ''
@@ -725,52 +736,65 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
     }
   }
 
-  try {
-    if (/\.tsx?$/.test(workflowsModulePath)) {
-      await ensureTsxRuntime()
+  const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools') ?? null
+  const runs = Array.from({ length: runCount }, (_, i) => i + 1)
+
+  console.log(`[elasticdash] Running workflow "${workflowName}" ${runCount} time(s) in ${mode} mode via subprocess`)
+
+  async function runOne(runNumber: number): Promise<ValidationRunTrace> {
+    console.log(`[elasticdash] === Run ${runNumber}: Starting workflow "${workflowName}" ===`)
+    const result = await runWorkflowInProcess(
+      workflowsModulePath!,
+      toolsModulePath,
+      workflowName,
+      workflowArgs,
+      workflowInput,
+    )
+
+    // Reconstruct a minimal TraceHandle from serialised trace arrays
+    const traceStub = {
+      getSteps: () => (result.steps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getSteps'] extends () => infer R ? R : never,
+      getLLMSteps: () => (result.llmSteps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getLLMSteps'] extends () => infer R ? R : never,
+      getToolCalls: () => (result.toolCalls ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getToolCalls'] extends () => infer R ? R : never,
+      getCustomSteps: () => (result.customSteps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getCustomSteps'] extends () => infer R ? R : never,
+      recordLLMStep: () => {},
+      recordToolCall: () => {},
+      recordCustomStep: () => {},
     }
 
-    const mod = await import(pathToFileURL(workflowsModulePath).href)
-    const workflowFn = mod[workflowName]
-    if (typeof workflowFn !== 'function') {
+    if (!result.ok) {
+      console.error(`[elasticdash] Run ${runNumber}: Workflow failed:`, result.error)
       return {
+        runNumber,
         ok: false,
-        mode,
-        runCount,
-        traces: [],
-        error: `Workflow "${workflowName}" is not an exported function in ${path.basename(workflowsModulePath)}.`,
+        error: result.error,
+        observations: buildValidationObservations(workflowName, workflowInput, undefined, result.error, traceStub),
       }
     }
 
-    installAIInterceptor()
-    try {
-      const runs = Array.from({ length: runCount }, (_, i) => i + 1)
-      let traces: ValidationRunTrace[] = []
-
-      console.log(`[elasticdash] Running workflow "${workflowName}" ${runCount} time(s) in ${mode} mode with args:`, workflowArgs)
-
-      if (sequential) {
-        for (const runNumber of runs) {
-          traces.push(await runWorkflowValidation(cwd, workflowName, workflowFn, workflowArgs, workflowInput, runNumber))
-        }
-      } else {
-        traces = await Promise.all(runs.map(runNumber => runWorkflowValidation(cwd, workflowName, workflowFn, workflowArgs, workflowInput, runNumber)))
-      }
-      
-      console.log(`[elasticdash] Completed ${traces.length} workflow run(s). Success: ${traces.filter(t => t.ok).length}, Failed: ${traces.filter(t => !t.ok).length}`)
-
-      return {
-        ok: true,
-        mode,
-        runCount,
-        traces,
-      }
-    } finally {
-      uninstallAIInterceptor()
+    console.log(`[elasticdash] Run ${runNumber}: Workflow completed successfully`)
+    return {
+      runNumber,
+      ok: true,
+      observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, undefined, traceStub),
     }
+  }
+
+  try {
+    let traces: ValidationRunTrace[]
+    if (sequential) {
+      traces = []
+      for (const runNumber of runs) {
+        traces.push(await runOne(runNumber))
+      }
+    } else {
+      traces = await Promise.all(runs.map(runOne))
+    }
+
+    console.log(`[elasticdash] Completed ${traces.length} workflow run(s). Success: ${traces.filter(t => t.ok).length}, Failed: ${traces.filter(t => !t.ok).length}`)
+    return { ok: true, mode, runCount, traces }
   } catch (error) {
     console.error('[elasticdash] Workflow validation failed with exception:', error)
-    console.error('[elasticdash] Error stack:', (error as Error).stack)
     return {
       ok: false,
       mode,
@@ -1187,3 +1211,84 @@ export async function startDashboardServer(
     },
   }
 }
+
+// Watch for changes in eb_* files
+const watcher = chokidar.watch('**/*', {
+  ignored: /node_modules/,
+  persistent: true
+});
+
+watcher.on('ready', () => {
+  console.log('File watcher is ready');
+});
+
+watcher.on('error', (error) => {
+  console.error('File watcher error:', error);
+});
+
+// Throttle refetching to avoid excessive calls
+let refetchTimeout: NodeJS.Timeout | null = null;
+watcher.on('change', (path) => {
+  if (refetchTimeout) clearTimeout(refetchTimeout);
+  refetchTimeout = setTimeout(() => {
+    console.log(`File ${path} has been changed`);
+    refetchFunctions();
+  }, 1000); // Throttle to 1 second
+});
+
+async function refetchFunctions() {
+  console.log('Refetching functions...');
+
+  // Clear the require cache for all files in the watched directory (ESM-compatible)
+  const visited = new Set<string>();
+
+  async function clearCacheRecursively(url: string) {
+    console.log(`Clearing cache for ${url}`);
+    if (visited.has(url)) return; // Avoid infinite loops in circular dependencies
+    visited.add(url);
+
+    try {
+      const worker = new Worker('./runner.js', {
+        workerData: { url },
+      });
+
+      worker.on('message', (message) => {
+        console.log(`Worker message: ${message}`);
+      });
+
+      worker.on('error', (error) => {
+        console.warn(`Worker error for ${url}:`, error);
+      });
+
+      worker.on('exit', (code) => {
+        if (code !== 0) {
+          console.warn(`Worker stopped with exit code ${code}`);
+        }
+      });
+
+      await new Promise((resolve) => worker.on('exit', resolve));
+    } catch (error) {
+      console.warn(`Failed to clear cache for ${url}:`, error);
+    }
+  }
+
+  try {
+    const watchedDirectory = 'path/to/watched/directory';
+    const resolvedUrl = pathToFileURL(watchedDirectory).href;
+    await clearCacheRecursively(resolvedUrl);
+
+    // Re-import and reload functions
+    const updatedFunctions = await import(`${resolvedUrl}?v=${Date.now()}`);
+    console.log('Functions reloaded:', Object.keys(updatedFunctions));
+  } catch (error) {
+    console.error('Error reloading functions:', error);
+  }
+}
+
+// Global map for updated AI inputs (used by dashboard UI)
+// The dashboard.html UI expects three buttons for editable AI input:
+// - Edit: Shows textarea for editing input (only for AI calls)
+// - Save: Saves the updated input from textarea
+// - Reset: Removes the updated input and restores original
+// These buttons are rendered in the HTML string and handled by window.enableInputEditing, window.saveUpdatedInput, window.resetInput.
+export const updatedInputs: Map<number, string> = new Map();

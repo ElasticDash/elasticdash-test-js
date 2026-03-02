@@ -86,6 +86,9 @@
             .observation-table-wrap { max-height: 260px; }
             }
         </style>
+        <script>
+            const updatedInputs = new Map();
+        </script>
     </head>
     <body>
         <div class="container">
@@ -611,7 +614,7 @@
                             col2 += `<div class="observation-table-wrap"><table class="observation-table"><thead><tr><th>Run</th><th>Status</th></tr></thead><tbody>`;
                             col2 += history.map((run, ri) => {
                                 const isSelRun = ri === step4SelectedRun;
-                                const status = run.running ? '⟳ Running' : (run.ok ? '✓ Success' : '✗ Failed');
+                                const status = run.running ? '⟳ Running' : (run.ok ? '✓ Complete' : '✗ Failed');
                                 return `<tr class="${isSelRun ? 'selected' : ''}" onclick="window.step4SelectRun(${ri})"><td>Run ${run.runNumber}</td><td>${status}</td></tr>`;
                             }).join('');
                             col2 += `</tbody></table></div>`;
@@ -642,10 +645,31 @@
                                 currentOutputSection = `<div class="detail-section"><div class="detail-title">Current Output</div><pre class="detail-pre">Rerun failed: ${esc(run.error || 'Unknown error')}</pre></div>`;
                             }
                         }
+                        // Editable AI input UI
+                        let inputSection = '';
+                        if (obs.type === "GENERATION") {
+                            const hasUpdate = updatedInputs.has(selectedObservationIndex);
+                            inputSection += `<div class="detail-section">
+                                <div class="detail-title">Input</div>
+                                <pre class="detail-pre" style="position:relative;">${esc(toDisplayText(obs.input, obs.type))}
+                                    <button class="btn btn-secondary edit-btn" style="position:absolute;top:8px;right:60px;padding:2px 10px;font-size:12px;${hasUpdate ? 'display:none;' : ''}" onclick="window.enableInputEditing('${detailId}', ${selectedObservationIndex})">Edit</button>
+                                    <button class="btn btn-secondary reset-btn" style="position:absolute;top:8px;right:8px;padding:2px 10px;font-size:12px;${hasUpdate ? '' : 'display:none;'}" onclick="window.resetInput('${detailId}', ${selectedObservationIndex})">Reset</button>
+                                </pre>
+                            </div>`;
+                            if (hasUpdate) {
+                                inputSection += `<div class="detail-section updated-input-section">
+                                    <div class="detail-title">Update Input</div>
+                                    <textarea class="detail-pre" style="width:100%;height:100px;">${esc(updatedInputs.get(selectedObservationIndex))}</textarea>
+                                    <button class="btn btn-secondary save-btn" style="margin-top:8px;float:right;padding:2px 10px;font-size:12px;" onclick="window.saveUpdatedInput(${selectedObservationIndex})">Save</button>
+                                </div>`;
+                            }
+                        } else {
+                            inputSection += `<div class="detail-section"><div class="detail-title">Input</div><pre class="detail-pre">${esc(toDisplayText(obs.input, obs.type))}</pre></div>`;
+                        }
                         col3 = `<div class="detail-sections" id="${detailId}">
                             ${filePathHtml}
                             ${renderModel(obs)}
-                            <div class="detail-section"><div class="detail-title">Input</div><pre class="detail-pre">${esc(inputText)}</pre></div>
+                            ${inputSection}
                             <div class="detail-section"><div class="detail-title">Output</div><pre class="detail-pre">${esc(outputText)}</pre></div>
                             ${currentOutputSection}
                         </div>`;
@@ -753,7 +777,12 @@
 
             async function rerunObservation(index) {
                 const obs = currentObservations[index];
-                if (!obs) return;
+                let inputToUse = obs.input;
+                if (obs.type === "GENERATION" && updatedInputs.has(index)) {
+                    inputToUse = updatedInputs.get(index);
+                }
+                // Proceed with rerun logic using inputToUse
+                console.log('Rerunning observation with input:', inputToUse);
                 const history = rerunHistory.get(index) || [];
                 const newRun = { runNumber: history.length + 1, running: true, ok: null };
                 history.push(newRun);
@@ -764,10 +793,11 @@
                 }
                 renderObservationTable();
                 try {
+                    const payload = { observation: { ...obs, input: inputToUse } };
                     const response = await fetch('/api/rerun-observation', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ observation: obs }),
+                        body: JSON.stringify(payload),
                     });
                     const data = await response.json();
                     newRun.running = false;
