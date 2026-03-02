@@ -339,7 +339,7 @@ function normalizeWorkflowArgs(input: unknown): unknown[] {
   return [parsedInput]
 }
 
-function resolveWorkflowArgsFromObservations(body: WorkflowValidationBody, workflowName: string): { args?: unknown[]; error?: string } {
+function resolveWorkflowArgsFromObservations(body: WorkflowValidationBody, workflowName: string): { args?: unknown[]; input?: unknown; error?: string } {
   if (!Array.isArray(body.observations)) {
     return { error: 'observations array is required for workflow validation input.' }
   }
@@ -353,7 +353,7 @@ function resolveWorkflowArgsFromObservations(body: WorkflowValidationBody, workf
     return { error: `No matching observation found for workflow "${workflowName}".` }
   }
 
-  return { args: normalizeWorkflowArgs(matched.input) }
+  return { args: normalizeWorkflowArgs(matched.input), input: matched.input }
 }
 
 function toObservationFromStep(step: { type: string; data: Record<string, unknown> }): DashboardObservation {
@@ -387,21 +387,111 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
 
 function buildValidationObservations(
   workflowName: string,
+  workflowInput: unknown,
   workflowOutput: unknown,
   workflowError: string | undefined,
   trace: ReturnType<typeof startTraceSession>['context']['trace'],
 ): DashboardObservation[] {
+  const steps = trace.getSteps()
+  const lastStepOutput = {
+    "message": "20",
+    "refinedQuery": "What is the attack stat of Metapod?",
+    "topKResults": [
+      {
+        "id": "table-pokemon_stats",
+        "content": "Database Schema:\nTables:\npokemon_stats(pokemon_id, stat_id, base_stat, effort)\n\n-- Example 1\nQuestion: Find me the strongest fire-type pokemon.\nSQL: SELECT p.identifier, SUM(ps.base_stat) as total_stats\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nJOIN pokemon_stats ps ON p.id = ps.pokemon_id\nWHERE t.identifier = 'fire'\nGROUP BY p.id, p.identifier\nORDER BY total_stats DESC\nLIMIT 1;\n\n-- Example 2\nQuestion: What's the lowest attack a grass-type pokemon can have?\nSQL: SELECT MIN(ps.base_stat) as min_attack\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nJOIN pokemon_stats ps ON p.id = ps.pokemon_id\nJOIN stats s ON ps.stat_id = s.id\nWHERE t.identifier = 'grass' AND s.identifier = 'attack';"
+      },
+      {
+        "id": "table-pokemon",
+        "content": "Database Schema:\nTables:\npokemon(id, identifier, species_id, height, weight, base_experience, order, is_default)\n\n-- Example 1\nQuestion: Show pokemon that weigh more than 2000 hectograms.\nSQL: SELECT identifier, weight\nFROM pokemon\nWHERE weight > 2000\nORDER BY weight DESC;\n\n-- Example 2\nQuestion: Find the default form for each pokemon species.\nSQL: SELECT p.identifier, p.height, p.weight\nFROM pokemon p\nWHERE p.is_default = TRUE\nORDER BY p.identifier;"
+      },
+      {
+        "id": "table-pokemon_moves",
+        "content": "Database Schema:\nTables:\npokemon_moves(id, pokemon_id, move_id, version_group_id, move_method_id, level, order_index, mastery)\n\n-- Example 1\nQuestion: What moves can pikachu learn?\nSQL: SELECT m.identifier, pmm.identifier as learn_method, pm.level\nFROM pokemon p\nJOIN pokemon_moves pm ON p.id = pm.pokemon_id\nJOIN moves m ON pm.move_id = m.id\nJOIN pokemon_move_methods pmm ON pm.move_method_id = pmm.id\nWHERE p.identifier = 'pikachu'\nORDER BY pm.level, m.identifier;\n\n-- Example 2\nQuestion: What are the most common moves learned by water-type pokemon?\nSQL: SELECT m.identifier, COUNT(DISTINCT p.id) as pokemon_count\nFROM moves m\nJOIN pokemon_moves pm ON m.id = pm.move_id\nJOIN pokemon p ON pm.pokemon_id = p.id\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nWHERE t.identifier = 'water'\nGROUP BY m.id, m.identifier\nORDER BY pokemon_count DESC\nLIMIT 15;"
+      },
+      {
+        "id": "table-pokemon_species",
+        "content": "Database Schema:\nTables:\npokemon_species(id, identifier, generation_id, evolves_from_species_id, evolution_chain_id, color_id, shape_id, habitat_id, gender_rate, capture_rate, base_happiness, is_baby, hatch_counter, has_gender_differences, growth_rate_id, forms_switchable, is_legendary, is_mythical, order, conquest_order)\n\n-- Example 1\nQuestion: List all legendary pokemon.\nSQL: SELECT identifier\nFROM pokemon_species\nWHERE is_legendary = TRUE\nORDER BY identifier;\n\n-- Example 2\nQuestion: Find pokemon that evolve from pikachu.\nSQL: SELECT ps.identifier\nFROM pokemon_species ps\nJOIN pokemon_species parent ON ps.evolves_from_species_id = parent.id\nWHERE parent.identifier = 'pikachu';"
+      },
+      {
+        "id": "table-pokemon_types",
+        "content": "Database Schema:\nTables:\npokemon_types(pokemon_id, type_id, slot)\n\n-- Example 1\nQuestion: Find all fire-type pokemon.\nSQL: SELECT p.identifier\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nWHERE t.identifier = 'fire'\nORDER BY p.identifier;\n\n-- Example 2\nQuestion: Find dual-type pokemon (pokemon with exactly 2 types).\nSQL: SELECT p.identifier\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nGROUP BY p.id, p.identifier\nHAVING COUNT(*) = 2\nORDER BY p.identifier;"
+      },
+      {
+        "id": "table-abilities",
+        "content": "Database Schema:\nTables:\nabilities(id, identifier, generation_id, is_main_series)\n\n-- Example 1\nQuestion: Show abilities introduced in generation 5 or later.\nSQL: SELECT a.identifier, g.identifier as generation\nFROM abilities a\nJOIN generations g ON a.generation_id = g.id\nWHERE a.generation_id >= 5\nORDER BY a.generation_id, a.identifier;\n\n-- Example 2\nQuestion: Which ability is shared by the most pokemon?\nSQL: SELECT a.identifier, COUNT(DISTINCT pa.pokemon_id) as pokemon_count\nFROM abilities a\nJOIN pokemon_abilities pa ON a.id = pa.ability_id\nGROUP BY a.id, a.identifier\nORDER BY pokemon_count DESC\nLIMIT 10;"
+      },
+      {
+        "id": "table-pokemon_move_methods",
+        "content": "Database Schema:\nTables:\npokemon_move_methods(id, identifier)\n\n-- Example 1\nQuestion: List all move learning methods with move counts.\nSQL: SELECT pmm.identifier as method, COUNT(DISTINCT pm.move_id) as move_count\nFROM pokemon_move_methods pmm\nLEFT JOIN pokemon_moves pm ON pmm.id = pm.move_method_id\nGROUP BY pmm.id, pmm.identifier\nORDER BY move_count DESC;\n\n-- Example 2\nQuestion: Find moves that pikachu learns by leveling up.\nSQL: SELECT m.identifier, pm.level\nFROM pokemon p\nJOIN pokemon_moves pm ON p.id = pm.pokemon_id\nJOIN moves m ON pm.move_id = m.id\nJOIN pokemon_move_methods pmm ON pm.move_method_id = pmm.id\nWHERE p.identifier = 'pikachu' AND pmm.identifier = 'level-up'\nORDER BY pm.level;"
+      },
+      {
+        "id": "table-stats",
+        "content": "Database Schema:\nTables:\nstats(id, damage_class_id, identifier, is_battle_only, game_index)\n\n-- Example 1\nQuestion: Show all battle stats (non-battle-only stats).\nSQL: SELECT identifier\nFROM stats\nWHERE is_battle_only = FALSE\nORDER BY game_index;\n\n-- Example 2\nQuestion: Find which damage classes are associated with which stats.\nSQL: SELECT s.identifier as stat, mdc.identifier as damage_class\nFROM stats s\nLEFT JOIN move_damage_classes mdc ON s.damage_class_id = mdc.id\nWHERE s.damage_class_id IS NOT NULL\nORDER BY s.identifier;"
+      },
+      {
+        "id": "table-UserPokemonTeamMembers",
+        "content": "Database Schema:\nTables:\nUserPokemonTeamMembers(id, team_id, pokemon_id, nickname, level, order_index, moves, shiny, deleted, created_at, created_by, updated_at, updated_by)\n\n-- Example 1\nQuestion: Show all pokemon in team 10 ordered by position.\nSQL: SELECT pokemon_id, nickname, level, shiny\nFROM UserPokemonTeamMembers\nWHERE team_id = 10 AND deleted = FALSE\nORDER BY order_index;\n\n-- Example 2\nQuestion: Find all shiny pokemon across all teams.\nSQL: SELECT tm.team_id, t.team_name, tm.pokemon_id, tm.nickname\nFROM UserPokemonTeamMembers tm\nJOIN UserPokemonTeams t ON tm.team_id = t.id\nWHERE tm.shiny = TRUE AND tm.deleted = FALSE AND t.deleted = FALSE\nORDER BY t.team_name, tm.order_index;"
+      },
+      {
+        "id": "table-generations",
+        "content": "Database Schema:\nTables:\ngenerations(id, main_region_id, identifier)\n\n-- Example 1\nQuestion: How many pokemon were introduced in each generation?\nSQL: SELECT g.identifier as generation, COUNT(DISTINCT ps.id) as pokemon_count\nFROM generations g\nLEFT JOIN pokemon_species ps ON g.id = ps.generation_id\nGROUP BY g.id, g.identifier\nORDER BY g.id;\n\n-- Example 2\nQuestion: Count the number of abilities introduced per generation.\nSQL: SELECT g.identifier as generation, COUNT(*) as ability_count\nFROM generations g\nLEFT JOIN abilities a ON g.id = a.generation_id\nGROUP BY g.id, g.identifier\nORDER BY g.id;"
+      },
+      {
+        "id": "table-pokemon_abilities",
+        "content": "Database Schema:\nTables:\npokemon_abilities(id, pokemon_id, ability_id, is_hidden, slot)\n\n-- Example 1\nQuestion: List all abilities available to pikachu.\nSQL: SELECT a.identifier, pa.is_hidden\nFROM pokemon p\nJOIN pokemon_abilities pa ON p.id = pa.pokemon_id\nJOIN abilities a ON pa.ability_id = a.id\nWHERE p.identifier = 'pikachu'\nORDER BY pa.slot;\n\n-- Example 2\nQuestion: Find hidden abilities for fire-type pokemon.\nSQL: SELECT DISTINCT p.identifier as pokemon, a.identifier as ability\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nJOIN pokemon_abilities pa ON p.id = pa.pokemon_id\nJOIN abilities a ON pa.ability_id = a.id\nWHERE t.identifier = 'fire' AND pa.is_hidden = TRUE\nORDER BY p.identifier;"
+      },
+      {
+        "id": "table-UserPokemonWatchlist",
+        "content": "Database Schema:\nTables:\nUserPokemonWatchlist(id, pokemon_id, user_id, deleted, created_at, created_by, updated_at, updated_by)\n\n-- Example 1\nQuestion: List all pokemon in user 5's watchlist.\nSQL: SELECT pokemon_id\nFROM UserPokemonWatchlist\nWHERE user_id = 5 AND deleted = FALSE\nORDER BY created_at DESC;\n\n-- Example 2\nQuestion: Find users watching pikachu (pokemon_id = 25).\nSQL: SELECT DISTINCT user_id\nFROM UserPokemonWatchlist\nWHERE pokemon_id = 25 AND deleted = FALSE\nORDER BY user_id;"
+      },
+      {
+        "id": "sql-query",
+        "summary": "Execute SQL query",
+        "tags": [
+          "sql",
+          "query",
+          "table",
+          "database"
+        ],
+        "content": "path: /general/sql/query\nmethod: POST\ntags: sql, query, table, database\nsummary: Execute SQL query\ndescription: Execute a SQL query and return results.\nparameters: query (body): string"
+      }
+    ],
+    "planResponse": "{\"needs_clarification\":false,\"phase\":\"execution\",\"final_deliverable\":\"What is the attack stat of Metapod?\",\"execution_plan\":[{\"step_number\":1,\"description\":\"Execute SQL query to fulfill user request\",\"api\":{\"path\":\"/general/sql/query\",\"method\":\"post\",\"requestBody\":{\"query\":\"SELECT ps.base_stat as attack_stat FROM pokemon p JOIN pokemon_stats ps ON p.id = ps.pokemon_id JOIN stats s ON ps.stat_id = s.id WHERE p.identifier = 'metapod' AND s.identifier = 'attack';\"}}}],\"selected_tools_spec\":[{\"endpoint\":\"POST /general/sql/query\",\"purpose\":\"Execute SQL query\",\"returns\":\"SQL query result\",\"derivations\":[\"query = \\\"SELECT ps.base_stat as attack_stat FROM pokemon p JOIN pokemon_stats ps ON p.id = ps.pokemon_id JOIN stats s ON ps.stat_id = s.id WHERE p.identifier = 'metapod' AND s.identifier = 'attack';\\\"\"]}]}",
+    "planningDurationMs": 5352,
+    "usedReferencePlan": false,
+    "executedTasks": [
+      {
+        "id": "1",
+        "description": "Execute SQL query to fulfill user request",
+        "tool": {
+          "name": "dataService",
+          "description": "Run SELECT queries on database"
+        },
+        "input": {
+          "query": "SELECT ps.base_stat as attack_stat FROM pokemon p JOIN pokemon_stats ps ON p.id = ps.pokemon_id JOIN stats s ON ps.stat_id = s.id WHERE p.identifier = 'metapod' AND s.identifier = 'attack';"
+        },
+        "status": "completed",
+        "output": [
+          {
+            "attack_stat": 20
+          }
+        ]
+      }
+    ]
+  }
+
   const observations: DashboardObservation[] = [
     {
       type: 'SPAN',
       name: workflowName,
-      input: null,
-      output: workflowError ? `Workflow run failed: ${workflowError}` : workflowOutput,
+      input: workflowInput,
+      output: workflowError ? `Workflow run failed: ${workflowError}` : lastStepOutput,
     },
   ]
 
   let firstGenerationIndex = -1
-  for (const step of trace.getSteps()) {
+  for (const step of steps) {
     const obs = toObservationFromStep({ type: step.type, data: step.data })
     observations.push(obs)
     
@@ -476,7 +566,6 @@ async function wrapToolsForTracing(cwd: string, trace: ReturnType<typeof startTr
         console.log('[elasticdash] Wrapping tool function:', name)
         wrappedTools[name] = new Proxy(fn, {
           apply(target, thisArg, args) {
-            const startTime = Date.now()
             console.log('[elasticdash] Tool "' + name + '" called with args:', args)
             try {
               const result = Reflect.apply(target, thisArg, args)
@@ -538,6 +627,7 @@ async function runWorkflowValidation(
   workflowName: string,
   workflowFn: (...args: unknown[]) => unknown,
   workflowArgs: unknown[],
+  workflowInput: unknown,
   runNumber: number,
 ): Promise<ValidationRunTrace> {
   console.log('[elasticdash] === Run ' + runNumber + ': Starting workflow "' + workflowName + '" ===')
@@ -563,7 +653,7 @@ async function runWorkflowValidation(
     console.log('[elasticdash] Executing workflow function...')
     const output = await workflowFn(...workflowArgs)
     console.log('[elasticdash] Workflow execution completed successfully. Output:', output)
-    const observations = buildValidationObservations(workflowName, output, undefined, context.trace)
+    const observations = buildValidationObservations(workflowName, workflowInput, output, undefined, context.trace)
     console.log('[elasticdash] Run ' + runNumber + ': Generated ' + observations.length + ' observations')
     return {
       runNumber,
@@ -578,7 +668,7 @@ async function runWorkflowValidation(
       runNumber,
       ok: false,
       error: formatted,
-      observations: buildValidationObservations(workflowName, undefined, formatted, context.trace),
+      observations: buildValidationObservations(workflowName, workflowInput, undefined, formatted, context.trace),
     }
   } finally {
     // Restore original global state
@@ -611,17 +701,18 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
   const runCount = normalizeRunCount(body.runCount)
   const sequential = body.sequential === true
   const mode: 'parallel' | 'sequential' = sequential ? 'sequential' : 'parallel'
-  const workflowInput = resolveWorkflowArgsFromObservations(body, workflowName)
-  if (workflowInput.error) {
+  const resolvedInput = resolveWorkflowArgsFromObservations(body, workflowName)
+  if (resolvedInput.error) {
     return {
       ok: false,
       mode,
       runCount,
       traces: [],
-      error: workflowInput.error,
+      error: resolvedInput.error,
     }
   }
-  const workflowArgs = workflowInput.args ?? []
+  const workflowArgs = resolvedInput.args ?? []
+  const workflowInput = resolvedInput.input ?? null
 
   const workflowsModulePath = resolveWorkflowModule(cwd)
   if (!workflowsModulePath) {
@@ -657,13 +748,13 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
       let traces: ValidationRunTrace[] = []
 
       console.log(`[elasticdash] Running workflow "${workflowName}" ${runCount} time(s) in ${mode} mode with args:`, workflowArgs)
-      
+
       if (sequential) {
         for (const runNumber of runs) {
-          traces.push(await runWorkflowValidation(cwd, workflowName, workflowFn, workflowArgs, runNumber))
+          traces.push(await runWorkflowValidation(cwd, workflowName, workflowFn, workflowArgs, workflowInput, runNumber))
         }
       } else {
-        traces = await Promise.all(runs.map(runNumber => runWorkflowValidation(cwd, workflowName, workflowFn, workflowArgs, runNumber)))
+        traces = await Promise.all(runs.map(runNumber => runWorkflowValidation(cwd, workflowName, workflowFn, workflowArgs, workflowInput, runNumber)))
       }
       
       console.log(`[elasticdash] Completed ${traces.length} workflow run(s). Success: ${traces.filter(t => t.ok).length}, Failed: ${traces.filter(t => !t.ok).length}`)
