@@ -226,66 +226,53 @@
                     window.step4SelectObservation(checkedArray[0]);
                 }
             } else if (currentStep === 4) {
-                // Move to Step 5
-                    // Show validation dialog before moving to Step 5
-                    if (!window.liveValidationDialog) {
-                    window.liveValidationDialog = document.createElement('div');
-                    window.liveValidationDialog.id = 'liveValidationDialog';
-                    window.liveValidationDialog.style = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center;z-index:9999;';
-                    window.liveValidationDialog.innerHTML = `
-                        <div style="background:white;padding:32px 28px;border-radius:12px;box-shadow:0 2px 24px #0002;min-width:600px;max-width:90vw;">
-                        <h3 style="margin-top:0;margin-bottom:18px;font-size:20px;">Validate Updated Flow with Live Data</h3>
-                        <label style="font-size:15px;display:block;margin-bottom:8px;">How many times do you want to run the flow with live data?</label>
-                        <input id="liveValidationCount" type="number" min="1" value="1" style="width:100%;font-size:16px;padding:6px 10px;margin-bottom:18px;" />
-                        <label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:18px;">
-                            <input id="liveValidationSequential" type="checkbox" />
-                            Run in sequence instead of parallel
-                        </label>
-                        <div style="display:flex;gap:12px;justify-content:flex-end;">
-                            <button id="cancelLiveValidation" class="btn btn-secondary">Cancel</button>
-                            <button id="submitLiveValidation" class="btn btn-primary">Validate</button>
-                        </div>
-                        </div>
-                    `;
-                    document.body.appendChild(window.liveValidationDialog);
-                    document.getElementById('cancelLiveValidation').onclick = function() {
-                        window.liveValidationDialog.remove();
-                        window.liveValidationDialog = null;
-                    };
-                    document.getElementById('submitLiveValidation').onclick = async function() {
-                        const count = parseInt(document.getElementById('liveValidationCount').value, 10);
-                        const sequential = document.getElementById('liveValidationSequential').checked;
-                        if (count >= 1) {
+                // Show prompt-update confirmation (if needed), then live validation dialog
+                window.openPromptConfirmation(() => window.openLiveValidationDialog());
+                return;
+            } else if (currentStep === 5) {
+                modal.classList.remove("open");
+                resetTraceModal();
+                customFooter.remove();
+            }
+            };
+            
+            window.openLiveValidationDialog = function() {
+                if (window.liveValidationDialog) return;
+                window.liveValidationDialog = document.createElement('div');
+                window.liveValidationDialog.id = 'liveValidationDialog';
+                window.liveValidationDialog.style = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center;z-index:9999;';
+                window.liveValidationDialog.innerHTML = `
+                    <div style="background:white;padding:32px 28px;border-radius:12px;box-shadow:0 2px 24px #0002;min-width:600px;max-width:90vw;">
+                    <h3 style="margin-top:0;margin-bottom:18px;font-size:20px;">Validate Updated Flow with Live Data</h3>
+                    <label style="font-size:15px;display:block;margin-bottom:8px;">How many times do you want to run the flow with live data?</label>
+                    <input id="liveValidationCount" type="number" min="1" value="1" style="width:100%;font-size:16px;padding:6px 10px;margin-bottom:18px;" />
+                    <label style="display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:18px;">
+                        <input id="liveValidationSequential" type="checkbox" />
+                        Run in sequence instead of parallel
+                    </label>
+                    <div style="display:flex;gap:12px;justify-content:flex-end;">
+                        <button id="cancelLiveValidation" class="btn btn-secondary">Cancel</button>
+                        <button id="submitLiveValidation" class="btn btn-primary">Validate</button>
+                    </div>
+                    </div>
+                `;
+                document.body.appendChild(window.liveValidationDialog);
+                document.getElementById('cancelLiveValidation').onclick = function() {
+                    window.liveValidationDialog.remove();
+                    window.liveValidationDialog = null;
+                };
+                document.getElementById('submitLiveValidation').onclick = async function() {
+                    const count = parseInt(document.getElementById('liveValidationCount').value, 10);
+                    const sequential = document.getElementById('liveValidationSequential').checked;
+                    if (count >= 1) {
                         const submitBtn = document.getElementById('submitLiveValidation');
                         submitBtn.disabled = true;
                         submitBtn.textContent = 'Validating...';
-                        
-                        console.log('[Dashboard] Starting validation:', {
-                            workflow: selectedWorkflow?.name,
-                            count,
-                            sequential,
-                            observationsCount: currentObservations.length
-                        });
-
+                        console.log('[Dashboard] Starting validation:', { workflow: selectedWorkflow?.name, count, sequential, observationsCount: currentObservations.length });
                         try {
-                            const payload = {
-                                workflowName: selectedWorkflow?.name,
-                                runCount: count,
-                                sequential,
-                                observations: currentObservations,
-                            };
-                            console.log('[Dashboard] Sending validation request:', payload);
-                            
-                            const response = await fetch('/api/validate-workflow', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(payload),
-                            });
-                            
+                            const payload = { workflowName: selectedWorkflow?.name, runCount: count, sequential, observations: currentObservations };
+                            const response = await fetch('/api/validate-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                             const data = await response.json();
-                            console.log('[Dashboard] Validation response:', data);
-                            
-                            // Close dialog and move to step 5
                             window.liveValidationDialog.remove();
                             window.liveValidationDialog = null;
                             window.liveValidationCount = count;
@@ -295,61 +282,78 @@
                             currentStep = 5;
                             updateModalTitle();
                             updateFooterButtons();
-                            
                             if (response.ok && data.ok) {
                                 step5RunTraces = Array.isArray(data.traces) ? data.traces : [];
-                                step5RunMeta = {
-                                    loading: false,
-                                    error: '',
-                                    runCount: typeof data.runCount === 'number' ? data.runCount : count,
-                                    sequential: data.mode === 'sequential',
-                                };
-                                console.log('[Dashboard] Validation succeeded:', step5RunTraces.length, 'traces');
+                                step5RunMeta = { loading: false, error: '', runCount: typeof data.runCount === 'number' ? data.runCount : count, sequential: data.mode === 'sequential' };
                             } else {
                                 step5RunTraces = [];
-                                step5RunMeta = {
-                                    loading: false,
-                                    error: data.error || 'Workflow validation failed.',
-                                    runCount: count,
-                                    sequential,
-                                };
-                                console.error('[Dashboard] Validation failed:', data.error);
+                                step5RunMeta = { loading: false, error: data.error || 'Workflow validation failed.', runCount: count, sequential };
                             }
                         } catch (err) {
-                            console.error('[Dashboard] Validation error:', err);
                             window.liveValidationDialog.remove();
                             window.liveValidationDialog = null;
                             currentStep = 5;
                             updateModalTitle();
                             updateFooterButtons();
-                            
                             step5RunTraces = [];
-                            step5RunMeta = {
-                                loading: false,
-                                error: err && err.message ? err.message : String(err),
-                                runCount: count,
-                                sequential,
-                            };
+                            step5RunMeta = { loading: false, error: err && err.message ? err.message : String(err), runCount: count, sequential };
                         }
-
-                        if (window.step5SelectedTrace > step5RunTraces.length) {
-                            window.step5SelectedTrace = 0;
-                        }
+                        if (window.step5SelectedTrace > step5RunTraces.length) window.step5SelectedTrace = 0;
                         window.step5SelectedObservation = 0;
                         renderObservationTable();
-                        } else {
+                    } else {
                         document.getElementById('liveValidationCount').style.borderColor = 'red';
-                        }
-                    };
-                    return;
                     }
-            } else if (currentStep === 5) {
-                modal.classList.remove("open");
-                resetTraceModal();
-                customFooter.remove();
-            }
+                };
             };
-            
+
+            window.openPromptConfirmation = function(onConfirm) {
+                const genObs = currentObservations
+                    .map((o, i) => ({ obs: o, idx: i }))
+                    .filter(({ obs, idx }) => obs.type === 'GENERATION' && checkedObservations.has(idx));
+                if (genObs.length === 0) { onConfirm(); return; }
+
+                const tableRows = genObs.map(({ obs, idx }) => {
+                    const preview = toDisplayText(obs.input, obs.type).replace(/\s+/g, ' ').trim().slice(0, 50);
+                    const model = obs.model || '—';
+                    return `<tr>
+                        <td style="padding:8px 10px;font-size:13px;color:#555;">${idx + 1}</td>
+                        <td style="padding:8px 10px;font-size:13px;font-family:Monaco,monospace;">${esc(obs.name || 'AI call')}</td>
+                        <td style="padding:8px 10px;font-size:12px;font-family:Monaco,monospace;color:#444;max-width:320px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(preview)}${preview.length === 50 ? '…' : ''}</td>
+                        <td style="padding:8px 10px;font-size:12px;font-family:Monaco,monospace;color:#555;">${esc(model)}</td>
+                    </tr>`;
+                }).join('');
+
+                const dlg = document.createElement('div');
+                dlg.style = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;z-index:9998;';
+                dlg.innerHTML = `
+                    <div style="background:white;padding:32px 28px;border-radius:12px;box-shadow:0 2px 24px #0003;min-width:640px;max-width:92vw;">
+                        <h3 style="margin-top:0;margin-bottom:8px;font-size:20px;">Have you updated your AI prompts?</h3>
+                        <p style="margin:0 0 18px;font-size:14px;color:#555;">The following AI generation steps were found in your trace. Make sure you have edited the prompts in Step 4 before validating with live data.</p>
+                        <div style="border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;margin-bottom:24px;">
+                            <table style="width:100%;border-collapse:collapse;">
+                                <thead>
+                                    <tr style="background:#f5f5f5;">
+                                        <th style="padding:8px 10px;text-align:left;font-size:12px;color:#555;border-bottom:1px solid #e0e0e0;">#</th>
+                                        <th style="padding:8px 10px;text-align:left;font-size:12px;color:#555;border-bottom:1px solid #e0e0e0;">Name</th>
+                                        <th style="padding:8px 10px;text-align:left;font-size:12px;color:#555;border-bottom:1px solid #e0e0e0;">Input preview</th>
+                                        <th style="padding:8px 10px;text-align:left;font-size:12px;color:#555;border-bottom:1px solid #e0e0e0;">Model</th>
+                                    </tr>
+                                </thead>
+                                <tbody>${tableRows}</tbody>
+                            </table>
+                        </div>
+                        <div style="display:flex;gap:12px;justify-content:flex-end;">
+                            <button id="cancelPromptConfirm" class="btn btn-secondary">Cancel</button>
+                            <button id="proceedPromptConfirm" class="btn btn-primary">Yes, Proceed</button>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(dlg);
+                dlg.querySelector('#cancelPromptConfirm').onclick = () => dlg.remove();
+                dlg.querySelector('#proceedPromptConfirm').onclick = () => { dlg.remove(); onConfirm(); };
+            };
+
             uploadArea.onclick = () => fileInput.click();
             
             fileInput.onchange = (e) => {
@@ -652,14 +656,14 @@
                             inputSection += `<div class="detail-section">
                                 <div class="detail-title">Input</div>
                                 <pre class="detail-pre" style="position:relative;">${esc(toDisplayText(obs.input, obs.type))}
-                                    <button class="btn btn-secondary edit-btn" style="position:absolute;top:8px;right:60px;padding:2px 10px;font-size:12px;${hasUpdate ? 'display:none;' : ''}" onclick="window.enableInputEditing('${detailId}', ${selectedObservationIndex})">Edit</button>
+                                    <button class="btn btn-secondary edit-btn" style="position:absolute;top:8px;right:8px;padding:2px 10px;font-size:12px;${hasUpdate ? 'display:none;' : ''}" onclick="window.enableInputEditing('${detailId}', ${selectedObservationIndex})">Edit</button>
                                     <button class="btn btn-secondary reset-btn" style="position:absolute;top:8px;right:8px;padding:2px 10px;font-size:12px;${hasUpdate ? '' : 'display:none;'}" onclick="window.resetInput('${detailId}', ${selectedObservationIndex})">Reset</button>
                                 </pre>
                             </div>`;
                             if (hasUpdate) {
                                 inputSection += `<div class="detail-section updated-input-section">
                                     <div class="detail-title">Update Input</div>
-                                    <textarea class="detail-pre" style="width:100%;height:100px;">${esc(updatedInputs.get(selectedObservationIndex))}</textarea>
+                                    <textarea id="editInputTextarea" class="detail-pre" style="width:100%;height:400px;">${esc(updatedInputs.get(selectedObservationIndex))}</textarea>
                                     <button class="btn btn-secondary save-btn" style="margin-top:8px;float:right;padding:2px 10px;font-size:12px;" onclick="window.saveUpdatedInput(${selectedObservationIndex})">Save</button>
                                 </div>`;
                             }
@@ -817,6 +821,27 @@
                     renderObservationTable();
                 }
             }
+
+            window.enableInputEditing = function(detailId, index) {
+                const obs = currentObservations[index];
+                const current = updatedInputs.has(index)
+                    ? updatedInputs.get(index)
+                    : toDisplayText(obs.input, obs.type);
+                updatedInputs.set(index, current);
+                renderObservationTable();
+            };
+
+            window.resetInput = function(detailId, index) {
+                updatedInputs.delete(index);
+                renderObservationTable();
+            };
+
+            window.saveUpdatedInput = function(index) {
+                const ta = document.getElementById('editInputTextarea');
+                if (!ta) return;
+                updatedInputs.set(index, ta.value);
+                renderObservationTable();
+            };
 
             function getObsFilePath(obs) {
                 if (obs && obs.type === "TOOL") {
