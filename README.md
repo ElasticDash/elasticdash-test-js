@@ -495,6 +495,42 @@ uninstallAIInterceptor() // restore original fetch when done
 
 ---
 
+## Making Tools Globally Accessible
+
+To enable automatic tracing and capture of tool usage in your workflows, you should define your tools in `ed_tools.ts` and reference them by name (as globals) in your workflow code, **without importing them**.
+
+### Example: Defining and Using a Global Tool
+
+**Define your tool in `ed_tools.ts`:**
+
+```ts
+// ed_tools.ts
+export async function myTool(input: string): Promise<string> {
+  // ...tool logic...
+  return `Hello, ${input}!`
+}
+```
+
+**Use the tool in your workflow (no import needed):**
+
+```ts
+// ed_workflows.ts
+export async function myWorkflow(name: string) {
+  const result = await myTool(name) // myTool is available globally
+  return result
+}
+```
+
+### Why does this enable tool usage capture?
+
+When you run your workflow with ElasticDash, the runner automatically loads and wraps all exported tools from `ed_tools.ts`, injecting them into the global scope. This means any call to a tool by its global name (e.g., `myTool(...)`) is intercepted and recorded for tracing—**without requiring any changes to your workflow code**.
+
+If you import a tool directly (e.g., `import { myTool } from './ed_tools'`), the runner cannot intercept or wrap that reference, and tool usage will not be automatically captured in the trace.
+
+**Summary:**
+- Use tools as globals (no import) for full traceability and automatic tool call capture.
+- This approach keeps your workflow code clean and enables powerful debugging and analytics in ElasticDash.
+
 ## Non-Goals
 
 This runner intentionally does not support:
