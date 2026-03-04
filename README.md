@@ -495,37 +495,28 @@ uninstallAIInterceptor() // restore original fetch when done
 
 ---
 
-## Making Tools Globally Accessible
+## Recording Tool Calls Explicitly
 
-To enable automatic tracing and capture of tool usage in your workflows, you should define your tools in `ed_tools.ts` and reference them by name (as globals) in your workflow code, **without importing them**.
+If you want to ensure tool calls are always recorded in the workflow trace—regardless of how your tools are imported or used—you can use the `recordToolCall` utility provided by this SDK.
 
-### Example: Defining and Using a Global Tool
+### How to Use
 
-**Define your tool in `ed_tools.ts`:**
+1. Import the function in your tool implementation:
 
 ```ts
-// ed_tools.ts
-export async function myTool(input: string): Promise<string> {
+import { recordToolCall } from './src/tracing'
+
+export async function myTool(input: string) {
   // ...tool logic...
-  return `Hello, ${input}!`
-}
-```
-
-**Use the tool in your workflow (no import needed):**
-
-```ts
-// ed_workflows.ts
-export async function myWorkflow(name: string) {
-  const result = await myTool(name) // myTool is available globally
+  const result = `Hello, ${input}!`
+  recordToolCall('myTool', { input }, result)
   return result
 }
 ```
 
-### Why does this enable tool usage capture?
+2. When running under ElasticDash, all calls to `recordToolCall` will be captured in the workflow trace. When running locally or outside the runner, this function is a no-op and will not affect your code.
 
-When you run your workflow with ElasticDash, the runner automatically loads and wraps all exported tools from `ed_tools.ts`, injecting them into the global scope. This means any call to a tool by its global name (e.g., `myTool(...)`) is intercepted and recorded for tracing—**without requiring any changes to your workflow code**.
-
-If you import a tool directly (e.g., `import { myTool } from './ed_tools'`), the runner cannot intercept or wrap that reference, and tool usage will not be automatically captured in the trace.
+**This approach is robust and works with both imported and global tools.**
 
 **Summary:**
 - Use tools as globals (no import) for full traceability and automatic tool call capture.
