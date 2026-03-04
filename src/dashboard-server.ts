@@ -249,7 +249,7 @@ function runToolInSubprocess(
     let resultLine = ''
     let stderr = ''
 
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout.on('data', (chunk) => {
       const text = chunk.toString()
       for (const line of text.split('\n')) {
         if (line.startsWith(RESULT_PREFIX)) {
@@ -259,7 +259,7 @@ function runToolInSubprocess(
         }
       }
     })
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr.on('data', (chunk) => {
       stderr += chunk.toString()
       process.stderr.write(chunk)
     })
@@ -267,7 +267,7 @@ function runToolInSubprocess(
     child.on('close', () => {
       if (resultLine) {
         try {
-          resolve(JSON.parse(resultLine) as RerunResult)
+          resolve(JSON.parse(resultLine))
           return
         } catch { /* fall through */ }
       }
@@ -278,9 +278,14 @@ function runToolInSubprocess(
       resolve({ ok: false, error: `Failed to spawn tool subprocess: ${err.message}` })
     })
 
-    const payload = JSON.stringify({ toolsModulePath, toolName, args })
+    // Always use absolute file URL for toolsModulePath
+    const payload = JSON.stringify({
+      toolsModulePath: pathToFileURL(toolsModulePath).pathname,
+      toolName,
+      args
+    })
     child.stdin.write(payload)
-    child.stdin.end()
+    child.stdin.end() // Always close stdin to avoid subprocess hang
   })
 }
 
@@ -294,107 +299,65 @@ interface WorkflowSubprocessResult {
   error?: string
 }
 
-import type { TraceHandle } from './trace-adapter/context.js'
-
-async function loadAndWrapToolsForProcess(
-  toolsModulePath: string,
-  trace: TraceHandle,
-): Promise<Record<string, (...a: unknown[]) => unknown>> {
-  try {
-    const toolsMod = await import(`${toolsModulePath}?v=${Date.now()}`)
-    const wrapped: Record<string, (...a: unknown[]) => unknown> = {}
-    for (const [name, fn] of Object.entries(toolsMod)) {
-      if (typeof fn !== 'function') continue
-      wrapped[name] = new Proxy(fn as (...a: unknown[]) => unknown, {
-        apply(target, thisArg, args) {
-          const result = Reflect.apply(target, thisArg, args)
-          if (result && typeof (result as Promise<unknown>).then === 'function') {
-            return (result as Promise<unknown>).then((v: unknown) => {
-              trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result: v })
-              return v
-            }).catch((e: unknown) => {
-              trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result: { error: String(e) } })
-              throw e
-            })
-          }
-          trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result })
-          return result
-        },
-      })
-    }
-    return wrapped
-  } catch {
-    return {}
-  }
-}
-
-async function runWorkflowInProcess(
+function runWorkflowInSubprocess(
   workflowsModulePath: string,
   toolsModulePath: string | null,
   workflowName: string,
   args: unknown[],
   input: unknown,
 ): Promise<WorkflowSubprocessResult> {
-  const { context, finalise } = startTraceSession()
-  setCurrentTrace(context.trace)
+  return new Promise((resolve) => {
+    const workerScript = new URL('./workflow-runner-worker.js', import.meta.url).pathname
 
-  const globals = global as Record<string, unknown>
-  const originalValues: Record<string, unknown> = {}
+    // Forward NODE_OPTIONS so tsx/esm transpiles TypeScript in the child process
+    const nodeOptions = process.env.NODE_OPTIONS ?? ''
+    const childEnv = { ...process.env, NODE_OPTIONS: nodeOptions }
 
-  if (toolsModulePath) {
-    const wrappedTools = await loadAndWrapToolsForProcess(toolsModulePath, context.trace)
-    for (const [name, fn] of Object.entries(wrappedTools)) {
-      originalValues[name] = globals[name]
-      globals[name] = fn
-    }
-  }
+    const child = spawn(process.execPath, [workerScript], {
+      env: childEnv,
+      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+    })
 
-  const originalExit = process.exit.bind(process)
-  ;(process as NodeJS.Process).exit = (() => undefined) as typeof process.exit
+    let fd3Data = ''
+    let stderr = ''
 
-  let currentOutput: unknown
-  let workflowError: Error | undefined
+    child.stdout.on('data', (chunk) => {
+      process.stdout.write(chunk)
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString()
+      process.stderr.write(chunk)
+    })
+    const fd3 = child.stdio[3] as import('stream').Readable | null
+    fd3?.on('data', (chunk: Buffer | string) => {
+      fd3Data += chunk.toString()
+    })
 
-  try {
-    const workflowsMod = await import(`${workflowsModulePath}?v=${Date.now()}`)
-    const workflowFn = workflowsMod[workflowName]
-    if (typeof workflowFn !== 'function') {
-      return { ok: false, error: `"${workflowName}" is not an exported function in the workflow module.` }
-    }
-
-    installAIInterceptor()
-    try {
-      const callArgs = args.length > 0 ? args : input !== null && input !== undefined ? [input] : []
-      currentOutput = await (workflowFn as (...a: unknown[]) => unknown)(...callArgs)
-    } finally {
-      uninstallAIInterceptor()
-    }
-  } catch (e) {
-    workflowError = e instanceof Error ? e : new Error(String(e))
-  } finally {
-    ;(process as NodeJS.Process).exit = originalExit
-    for (const [name, original] of Object.entries(originalValues)) {
-      if (original === undefined) {
-        delete globals[name]
-      } else {
-        globals[name] = original
+    child.on('close', () => {
+      if (fd3Data) {
+        try {
+          resolve(JSON.parse(fd3Data))
+          return
+        } catch { /* fall through */ }
       }
-    }
-    setCurrentTrace(undefined)
-    finalise()
-  }
+      resolve({ ok: false, error: stderr.trim() || 'Workflow subprocess produced no output.' })
+    })
 
-  const traceData = {
-    steps: context.trace.getSteps(),
-    llmSteps: context.trace.getLLMSteps(),
-    toolCalls: context.trace.getToolCalls(),
-    customSteps: context.trace.getCustomSteps(),
-  }
+    child.on('error', (err) => {
+      resolve({ ok: false, error: `Failed to spawn workflow subprocess: ${err.message}` })
+    })
 
-  if (workflowError) {
-    return { ok: false, error: workflowError.message ?? String(workflowError), ...traceData }
-  }
-  return { ok: true, currentOutput, ...traceData }
+    // Always use absolute file URL for workflowsModulePath and toolsModulePath
+    const payload = JSON.stringify({
+      workflowsModulePath: pathToFileURL(workflowsModulePath).pathname,
+      toolsModulePath: toolsModulePath ? pathToFileURL(toolsModulePath).pathname : undefined,
+      workflowName,
+      args,
+      input
+    })
+    child.stdin.write(payload)
+    child.stdin.end() // Always close stdin to avoid subprocess hang
+  })
 }
 
 async function runToolObservation(cwd: string, observation: DashboardObservation, tools: ToolInfo[]): Promise<RerunResult> {
@@ -743,13 +706,16 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
 
   async function runOne(runNumber: number): Promise<ValidationRunTrace> {
     console.log(`[elasticdash] === Run ${runNumber}: Starting workflow "${workflowName}" ===`)
-    const result = await runWorkflowInProcess(
+    const result = await runWorkflowInSubprocess(
       workflowsModulePath!,
       toolsModulePath,
       workflowName,
       workflowArgs,
       workflowInput,
     )
+    .catch(err => {
+      throw { ok: false, error: `Workflow subprocess failed: ${formatError(err)}` }
+    });
 
     // Reconstruct a minimal TraceHandle from serialised trace arrays
     const traceStub = {
