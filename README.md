@@ -501,10 +501,11 @@ If you want to ensure tool calls are always recorded in the workflow trace—reg
 
 ### How to Use
 
+
 1. Import the function in your tool implementation:
 
 ```ts
-import { recordToolCall } from './src/tracing'
+import { recordToolCall } from 'elasticdash-test'
 
 export async function myTool(input: string) {
   // ...tool logic...
