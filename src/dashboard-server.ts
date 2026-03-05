@@ -549,6 +549,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
 function buildValidationObservations(
   workflowName: string,
   workflowInput: unknown,
+  workflowOutput: unknown,
   workflowError: string | undefined,
   trace: ReturnType<typeof startTraceSession>['context']['trace'],
   workflowTrace?: WorkflowTrace,
@@ -560,7 +561,7 @@ function buildValidationObservations(
       type: 'SPAN',
       name: workflowName,
       input: workflowInput,
-      output: workflowError ? `Workflow run failed: ${workflowError}` : `Workflow run failed with unknown error`,
+      output: workflowError ? `Workflow run failed: ${workflowError}` : workflowOutput,
     },
   ]
 
@@ -664,7 +665,7 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
         runNumber,
         ok: false,
         error: result.error,
-        observations: buildValidationObservations(workflowName, workflowInput, result.error, traceStub, result.workflowTrace),
+        observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, result.error, traceStub, result.workflowTrace),
         workflowTrace: result.workflowTrace,
       }
     }
@@ -673,7 +674,7 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
     return {
       runNumber,
       ok: true,
-      observations: buildValidationObservations(workflowName, workflowInput, undefined, traceStub, result.workflowTrace),
+      observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, undefined, traceStub, result.workflowTrace),
       workflowTrace: result.workflowTrace,
     }
   }
@@ -1139,7 +1140,7 @@ export async function startDashboardServer(
             runNumber: 0,
             ok: result.ok,
             error: result.ok ? undefined : result.error,
-            observations: buildValidationObservations(workflowName, workflowInput, result.ok ? undefined : result.error, traceStub, result.workflowTrace),
+            observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, result.ok ? undefined : result.error, traceStub, result.workflowTrace),
             workflowTrace: result.workflowTrace,
           }
 
