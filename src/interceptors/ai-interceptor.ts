@@ -1,8 +1,9 @@
 import { getCurrentTrace } from '../trace-adapter/context.js'
+import { getCaptureContext } from '../capture/recorder.js'
 
 /** URL patterns for known AI providers */
 const AI_PATTERNS: Record<string, RegExp> = {
-  openai: /https?:\/\/api\.openai\.com\/v1\/(chat\/)?completions/,
+  openai: /https?:\/\/api\.openai\.com\/v1\/((chat\/)?completions|embeddings)/,
   gemini: /https?:\/\/generativelanguage\.googleapis\.com\/.*\/models\/[^/:]+:(generateContent|streamGenerateContent)/,
   grok:   /https?:\/\/api\.x\.ai\/v1\/(chat\/)?completions/,
   kimi:   /https?:\/\/api\.moonshot\.ai\/v1\/(chat\/)?completions/,
@@ -42,7 +43,10 @@ function extractPrompt(provider: string, body: Record<string, unknown>): string 
         .join('\n')
     }
     // Legacy completions API
-    return typeof body.prompt === 'string' ? body.prompt : ''
+    if (typeof body.prompt === 'string') return body.prompt
+    if (typeof body.input === 'string') return body.input
+    if (Array.isArray(body.input)) return body.input.map((v) => String(v)).join('\n')
+    return ''
   }
 
   if (provider === 'gemini') {
@@ -142,21 +146,73 @@ export function installAIInterceptor(): void {
       // Ignore parse errors — still pass through
     }
 
-    // Make the actual request
-    const response = await originalFetch!(input, init)
+    const ctx = getCaptureContext()
 
-    if (traceAtCall) {
+    if (ctx) {
+      const { recorder, replay } = ctx
+      const id = recorder.nextId()
+      const start = Date.now()
+
+      // Replay mode: return the historical response without making a real call
+      if (replay.shouldReplay(id)) {
+        const historicalEvent = replay.getRecordedEvent(id)
+        const historicalInput = historicalEvent?.input as Record<string, unknown> | undefined
+        const historicalUrl = typeof historicalInput?.url === 'string' ? historicalInput.url : undefined
+        const historicalProvider = typeof historicalInput?.provider === 'string' ? historicalInput.provider : undefined
+        const isReplayMatch = !!historicalEvent
+          && historicalEvent.type === 'ai'
+          && historicalProvider === provider
+          && historicalUrl === url
+
+        if (isReplayMatch && historicalEvent) {
+          recorder.record(historicalEvent)
+          const historicalOutput = historicalEvent.output as Record<string, unknown> | null
+          const completion = historicalOutput ? extractCompletion(provider, historicalOutput) : '(replayed)'
+          traceAtCall.recordLLMStep({ model, provider, prompt, completion })
+          return new Response(
+            historicalOutput != null ? JSON.stringify(historicalOutput) : null,
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        // No historical event found — fall through to fresh execution
+      }
+
+      // Fresh execution: make the real call and record to both systems
+      const response = await originalFetch!(input, init)
+      const durationMs = Date.now() - start
+
       if (isStreaming) {
         traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed)' })
+        recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: null, timestamp: start, durationMs })
       } else {
         try {
           const cloned = response.clone()
           const responseBody = await cloned.json() as Record<string, unknown>
           const completion = extractCompletion(provider, responseBody)
           traceAtCall.recordLLMStep({ model, provider, prompt, completion })
+          recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: responseBody, timestamp: start, durationMs })
         } catch {
           traceAtCall.recordLLMStep({ model, provider, prompt, completion: '' })
+          recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: null, timestamp: start, durationMs })
         }
+      }
+
+      return response
+    }
+
+    // No capture context — original behaviour (outside of a workflow run)
+    const response = await originalFetch!(input, init)
+
+    if (isStreaming) {
+      traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed)' })
+    } else {
+      try {
+        const cloned = response.clone()
+        const responseBody = await cloned.json() as Record<string, unknown>
+        const completion = extractCompletion(provider, responseBody)
+        traceAtCall.recordLLMStep({ model, provider, prompt, completion })
+      } catch {
+        traceAtCall.recordLLMStep({ model, provider, prompt, completion: '' })
       }
     }
 

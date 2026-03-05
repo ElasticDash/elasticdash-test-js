@@ -15,8 +15,14 @@ import 'dotenv/config'
 
 import { startTraceSession, setCurrentTrace } from './trace-adapter/context.js'
 import { installAIInterceptor, uninstallAIInterceptor } from './interceptors/ai-interceptor.js'
+import { TraceRecorder, setCaptureContext } from './capture/recorder.js'
+import { ReplayController } from './capture/replay.js'
+import { interceptFetch, restoreFetch } from './interceptors/http.js'
+import { interceptRandom, restoreRandom, interceptDateNow, restoreDateNow } from './interceptors/side-effects.js'
+import { installDBAutoInterceptor, uninstallDBAutoInterceptor } from './interceptors/db-auto.js'
 import { pathToFileURL } from 'url'
 import type { TraceHandle } from './trace-adapter/context.js'
+import type { WorkflowEvent } from './capture/event.js'
 import fs from 'node:fs'
 
 async function readStdin(): Promise<string> {
@@ -92,6 +98,9 @@ async function main() {
     workflowName: string
     args: unknown[]
     input: unknown
+    replayMode?: boolean
+    checkpoint?: number
+    history?: WorkflowEvent[]
   }
   try {
     payload = JSON.parse(raw)
@@ -101,10 +110,14 @@ async function main() {
     return
   }
 
-  const { workflowsModulePath, toolsModulePath, workflowName, args, input } = payload
+  const { workflowsModulePath, toolsModulePath, workflowName, args, input, replayMode = false, checkpoint = 0, history = [] } = payload
 
   const { context, finalise } = startTraceSession()
   setCurrentTrace(context.trace)
+
+  const recorder = new TraceRecorder()
+  const replay = new ReplayController(replayMode, checkpoint, history)
+  setCaptureContext({ recorder, replay })
 
   // Inject wrapped tools into global scope so the workflow can call them
   // NOTE: This only works if the workflow accesses tools as globals, not via import.
@@ -146,7 +159,11 @@ async function main() {
       return
     }
 
+    await installDBAutoInterceptor()
     installAIInterceptor()
+    interceptFetch()
+    interceptRandom()
+    interceptDateNow()
     try {
       // Standardize workflow argument resolution: always pass [input] if args is empty
       const callArgs = args.length ? args : [input]
@@ -154,6 +171,10 @@ async function main() {
       console.error('[worker] workflowFn resolved, currentOutput:', currentOutput)  // stderr so it's visible
     } finally {
       uninstallAIInterceptor()
+      restoreFetch()
+      restoreRandom()
+      restoreDateNow()
+      uninstallDBAutoInterceptor()
     }
   } catch (e) {
     workflowError = e instanceof Error ? e : new Error(String(e))
@@ -170,6 +191,7 @@ async function main() {
       }
     }
     setCurrentTrace(undefined)
+    setCaptureContext(undefined)
     finalise()
   }
 
@@ -178,6 +200,7 @@ async function main() {
     llmSteps: context.trace.getLLMSteps(),
     toolCalls: context.trace.getToolCalls(),
     customSteps: context.trace.getCustomSteps(),
+    workflowTrace: recorder.toTrace(),
   }
 
   if (workflowError) {

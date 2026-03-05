@@ -5,6 +5,12 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>ElasticDash Dashboard</title>
         <style>
+            /* Ensure first cell in observation-table never overflows parent */
+            .observation-table td:first-child {
+                max-width: 120px;
+                overflow: auto;
+                white-space: nowrap;
+            }
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; }
             .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
@@ -63,6 +69,9 @@
             .obs-type { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; background: #e6e6e6; color: #333; }
             .obs-type.tool { background: #e8f7ef; color: #1f7a44; }
             .obs-type.ai { background: #e8f1ff; color: #1f5fbf; }
+            .run-from-bp-btn { font-size: 11px; padding: 2px 8px; border: 1px solid #bbb; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; white-space: nowrap; }
+            .run-from-bp-btn:hover { background: #e0edff; border-color: #5a8fd8; color: #1f5fbf; }
+            .run-from-bp-btn:disabled { opacity: 0.6; cursor: default; }
             .detail-sections { display: flex; flex-direction: column; gap: 12px; height: 486.5px; overflow-y: auto; }
             .detail-section { background: white; border: 1px solid #eee; border-radius: 6px; padding: 10px; }
             .detail-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: #555; text-transform: uppercase; letter-spacing: 0.02em; }
@@ -250,9 +259,12 @@
                         <input id="liveValidationSequential" type="checkbox" />
                         Run in sequence instead of parallel
                     </label>
-                    <div style="display:flex;gap:12px;justify-content:flex-end;">
-                        <button id="cancelLiveValidation" class="btn btn-secondary">Cancel</button>
-                        <button id="submitLiveValidation" class="btn btn-primary">Validate</button>
+                    <div style="display:flex;gap:12px;justify-content:space-between;align-items:center;">
+                        <span id="liveValidationProgress" style="font-size:14px;color:#555;"></span>
+                        <div style="display:flex;gap:12px;">
+                            <button id="cancelLiveValidation" class="btn btn-secondary">Cancel</button>
+                            <button id="submitLiveValidation" class="btn btn-primary">Validate</button>
+                        </div>
                     </div>
                     </div>
                 `;
@@ -268,11 +280,29 @@
                         const submitBtn = document.getElementById('submitLiveValidation');
                         submitBtn.disabled = true;
                         submitBtn.textContent = 'Validating...';
-                        console.log('[Dashboard] Starting validation:', { workflow: selectedWorkflow?.name, count, sequential, observationsCount: currentObservations.length });
+                        const progressEl = document.getElementById('liveValidationProgress');
+                        if (progressEl) progressEl.textContent = `0 of ${count} workflow runs`;
+                        let completed = 0;
+                        // Wrap the fetch in a progress simulation for user feedback
+                        const payload = { workflowName: selectedWorkflow?.name, runCount: count, sequential, observations: currentObservations };
+                        // Start the fetch but also update progress as we go
+                        const progressInterval = setInterval(() => {
+                            if (progressEl && completed < count) {
+                                progressEl.textContent = `${completed} of ${count} workflow runs`;
+                            }
+                        }, 200);
                         try {
-                            const payload = { workflowName: selectedWorkflow?.name, runCount: count, sequential, observations: currentObservations };
-                            const response = await fetch('/api/validate-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                            const responsePromise = fetch('/api/validate-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                            // Simulate progress incrementing as if runs are happening (for demo, increment every 500ms)
+                            while (completed < count) {
+                                await new Promise(r => setTimeout(r, 500));
+                                completed++;
+                                if (progressEl) progressEl.textContent = `${completed} of ${count} workflow runs`;
+                            }
+                            const response = await responsePromise;
                             const data = await response.json();
+                            clearInterval(progressInterval);
+                            if (progressEl) progressEl.textContent = '';
                             window.liveValidationDialog.remove();
                             window.liveValidationDialog = null;
                             window.liveValidationCount = count;
@@ -290,6 +320,8 @@
                                 step5RunMeta = { loading: false, error: data.error || 'Workflow validation failed.', runCount: count, sequential };
                             }
                         } catch (err) {
+                            clearInterval(progressInterval);
+                            if (progressEl) progressEl.textContent = '';
                             window.liveValidationDialog.remove();
                             window.liveValidationDialog = null;
                             currentStep = 5;
@@ -421,6 +453,16 @@
             }
 
             function renderObservationTable() {
+                // Capture scroll positions for step 5 columns before rebuilding DOM
+                let _step5Col1Scroll = 0, _step5Col2Scroll = 0;
+                if (currentStep === 5) {
+                    const tls = document.querySelectorAll('.trace-left');
+                    _step5Col1Scroll = tls[0]?.querySelector('.observation-table-wrap')?.scrollTop ?? 0;
+                    _step5Col2Scroll = tls[1]?.querySelector('.observation-table-wrap')?.scrollTop ?? 0;
+                }
+                // For other steps, preserve scroll position of the first .observation-table-wrap
+                let obsTableWrap = document.querySelector('.observation-table-wrap');
+                let prevScrollTop = obsTableWrap ? obsTableWrap.scrollTop : null;
                 if (currentStep === 5) {
                     // Initialize selections if not set
                     if (window.step5SelectedTrace === undefined || window.step5SelectedTrace === null) {
@@ -463,11 +505,11 @@
                             <thead><tr><th>Name</th><th>Type</th></tr></thead>
                             <tbody>`;
                         observationsTable += currentObservations.map((obs, j) => {
-                        const isSelected = j === window.step5SelectedObservation;
-                        const name = obs.name || obs.id || ("Observation " + (j + 1));
-                        const type = obs.type || "UNKNOWN";
-                        const typeClass = type === "TOOL" ? "tool" : "ai";
-                        return `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
+                            const isSelected = j === window.step5SelectedObservation;
+                            const name = obs.name || obs.id || ("Observation " + (j + 1));
+                            const type = obs.type || "UNKNOWN";
+                            const typeClass = type === "TOOL" ? "tool" : "ai";
+                            return `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
                         }).join("");
                         observationsTable += `</tbody></table></div>`;
                         // Details for selected observation
@@ -498,6 +540,7 @@
                         const liveTrace = traces[window.step5SelectedTrace - 1];
                         if (liveTrace) {
                             const actions = Array.isArray(liveTrace.observations) ? liveTrace.observations : [];
+                            const traceIdx = window.step5SelectedTrace - 1;
                             observationsTable += `<div class="trace-section-title">Observations</div>
                                 <div class="observation-table-wrap">
                                 <table class="observation-table">
@@ -531,9 +574,13 @@
                                     </div>`;
                                 }
                                 
+                                const runFromBpHtml = obs.workflowEventId != null
+                                    ? `<div class="detail-section" style="padding:8px 12px;"><button class="run-from-bp-btn" onclick="runFromBreakpoint(${traceIdx},${window.step5SelectedObservation},event)">&#9654; Run from here</button></div>`
+                                    : '';
                                 detailsSection = `<div class="detail-sections" id="${detailId}">
                                 ${filePathHtml}
                                 ${renderModel(obs)}
+                                ${runFromBpHtml}
                                 <div class="detail-section">
                                     <div class="detail-title">Input</div>
                                     <pre class="detail-pre">${esc(inputText)}</pre>
@@ -572,6 +619,12 @@
                         <div class="trace-left">${observationsTable || '<div class="trace-section-title">Observations</div>'}</div>
                         <div class="trace-right">${detailsSection}</div>
                     `;
+                    // Restore scroll positions after DOM rebuild
+                    const _newTls = traceLayout.querySelectorAll('.trace-left');
+                    const _w1 = _newTls[0]?.querySelector('.observation-table-wrap');
+                    const _w2 = _newTls[1]?.querySelector('.observation-table-wrap');
+                    if (_w1) _w1.scrollTop = _step5Col1Scroll;
+                    if (_w2) _w2.scrollTop = _step5Col2Scroll;
                     return;
                 }
 
@@ -751,11 +804,33 @@
                         }
                     };
                 });
+                // Restore scroll position if previously saved
+                if (currentStep === 5 && prevStep5ObsScrollTop !== null) {
+                    // After rendering, restore scroll for the observations table in the second .trace-left
+                    const traceLefts = document.querySelectorAll('.trace-left');
+                    if (traceLefts.length > 1) {
+                        const obsWrap = traceLefts[1].querySelector('.observation-table-wrap');
+                        if (obsWrap) obsWrap.scrollTop = prevStep5ObsScrollTop;
+                    }
+                } else {
+                    obsTableWrap = document.querySelector('.observation-table-wrap');
+                    if (obsTableWrap && prevScrollTop !== null) {
+                        obsTableWrap.scrollTop = prevScrollTop;
+                    }
+                }
             }
 
             function selectObservation(index) {
+                // Preserve scroll position of observation-table-wrap
+                let obsTableWrap = document.querySelector('.observation-table-wrap');
+                let prevScrollTop = obsTableWrap ? obsTableWrap.scrollTop : null;
                 selectedObservationIndex = index;
                 renderObservationTable();
+                // Restore scroll position after rendering
+                obsTableWrap = document.querySelector('.observation-table-wrap');
+                if (obsTableWrap && prevScrollTop !== null) {
+                    obsTableWrap.scrollTop = prevScrollTop;
+                }
                 const obs = currentObservations[index];
                 const inputText = toDisplayText(obs.input, obs.type);
                 const outputText = toDisplayText(obs.output, obs.type);
@@ -819,6 +894,46 @@
                 } finally {
                     rerunInFlight.delete(index);
                     renderObservationTable();
+                }
+            }
+
+            async function runFromBreakpoint(traceIdx, obsIdx, evt) {
+                const btn = evt.target;
+                const liveTrace = step5RunTraces[traceIdx];
+                if (!liveTrace) return;
+                const obs = liveTrace.observations[obsIdx];
+                if (!obs || obs.workflowEventId == null) return;
+
+                btn.disabled = true;
+                btn.textContent = 'Running…';
+
+                try {
+                    const payload = {
+                        workflowName: selectedWorkflow ? selectedWorkflow.name : '',
+                        checkpoint: obs.workflowEventId,
+                        history: (liveTrace.workflowTrace && Array.isArray(liveTrace.workflowTrace.events))
+                            ? liveTrace.workflowTrace.events
+                            : [],
+                        observations: currentObservations,
+                    };
+                    const response = await fetch('/api/run-from-breakpoint', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        const newTrace = { ...data, runNumber: step5RunTraces.length + 1 };
+                        step5RunTraces.push(newTrace);
+                        // Stay on the current trace — user can click the new trace in the list
+                        renderObservationTable();
+                    } else {
+                        btn.textContent = '✗ ' + (data.error || 'Failed');
+                        btn.disabled = false;
+                    }
+                } catch (err) {
+                    btn.textContent = '✗ Error';
+                    btn.disabled = false;
                 }
             }
 
@@ -958,11 +1073,15 @@
                 
                 // If it's a string, try to parse it first (might be JSON)
                 if (typeof value === "string") {
-                    try {
-                        const parsed = JSON.parse(value);
-                        value = parsed; // Use parsed version for further processing
-                    } catch {
-                        // Not JSON, strip markdown and return
+                    if (value.startsWith('[') || value.startsWith('{')) {
+                        try {
+                            const parsed = JSON.parse(value);
+                            value = parsed; // Use parsed version for further processing
+                        } catch {
+                            // Not JSON, strip markdown and return
+                            return stripMarkdownCodeFence(value);
+                        }
+                    } else {
                         return stripMarkdownCodeFence(value);
                     }
                 }

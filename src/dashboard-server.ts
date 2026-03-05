@@ -4,8 +4,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'url'
 import { callProviderLLM } from './matchers/index.js'
-import { startTraceSession, setCurrentTrace } from './trace-adapter/context.js'
-import { installAIInterceptor, uninstallAIInterceptor } from './interceptors/ai-interceptor.js'
+import { startTraceSession } from './trace-adapter/context.js'
+import type { WorkflowTrace, WorkflowEvent } from './capture/event.js'
 import chokidar from 'chokidar';
 import express from 'express';
 import { Worker } from 'worker_threads';
@@ -68,6 +68,8 @@ interface DashboardObservation {
     temperature?: number
     max_tokens?: number
   }
+  startTime?: number
+  workflowEventId?: number
 }
 
 interface RerunResult {
@@ -87,6 +89,7 @@ interface ValidationRunTrace {
   runNumber: number
   ok: boolean
   observations: DashboardObservation[]
+  workflowTrace?: WorkflowTrace
   error?: string
 }
 
@@ -296,6 +299,7 @@ interface WorkflowSubprocessResult {
   llmSteps?: unknown[]
   toolCalls?: unknown[]
   customSteps?: unknown[]
+  workflowTrace?: WorkflowTrace
   error?: string
 }
 
@@ -305,6 +309,7 @@ function runWorkflowInSubprocess(
   workflowName: string,
   args: unknown[],
   input: unknown,
+  options?: { replayMode?: boolean; checkpoint?: number; history?: WorkflowEvent[] },
 ): Promise<WorkflowSubprocessResult> {
   return new Promise((resolve) => {
     const workerScript = new URL('./workflow-runner-worker.js', import.meta.url).pathname
@@ -353,7 +358,10 @@ function runWorkflowInSubprocess(
       toolsModulePath: toolsModulePath ? pathToFileURL(toolsModulePath).pathname : undefined,
       workflowName,
       args,
-      input
+      input,
+      ...(options?.replayMode !== undefined ? { replayMode: options.replayMode } : {}),
+      ...(options?.checkpoint !== undefined ? { checkpoint: options.checkpoint } : {}),
+      ...(options?.history !== undefined ? { history: options.history } : {}),
     })
     child.stdin.write(payload)
     child.stdin.end() // Always close stdin to avoid subprocess hang
@@ -474,7 +482,7 @@ function resolveWorkflowArgsFromObservations(body: WorkflowValidationBody, workf
   return { args: normalizeWorkflowArgs(matched.input), input: matched.input }
 }
 
-function toObservationFromStep(step: { type: string; data: Record<string, unknown> }): DashboardObservation {
+function toObservationFromStep(step: { type: string; data: Record<string, unknown>; timestamp?: number }): DashboardObservation {
   if (step.type === 'llm') {
     return {
       type: 'GENERATION',
@@ -483,6 +491,7 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
       model: typeof step.data.model === 'string' ? step.data.model : undefined,
       input: step.data.prompt,
       output: step.data.completion,
+      startTime: step.timestamp,
     }
   }
 
@@ -492,6 +501,7 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
       name: typeof step.data.name === 'string' ? step.data.name : 'tool',
       input: step.data.args,
       output: step.data.result,
+      startTime: step.timestamp,
     }
   }
 
@@ -500,165 +510,85 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
     name: typeof step.data.name === 'string' ? step.data.name : typeof step.data.kind === 'string' ? step.data.kind : 'custom',
     input: step.data.payload ?? step.data.metadata,
     output: step.data.result,
+    startTime: step.timestamp,
+  }
+}
+
+function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservation {
+  if (event.type === 'http') {
+    const inp = event.input as { url?: string; method?: string } | undefined
+    return {
+      type: 'HTTP',
+      name: inp?.url ?? 'http',
+      input: event.input,
+      output: event.output,
+      startTime: event.timestamp,
+      workflowEventId: event.id,
+    }
+  }
+  if (event.type === 'db') {
+    return {
+      type: 'DB',
+      name: event.name,
+      input: event.input,
+      output: event.output,
+      startTime: event.timestamp,
+      workflowEventId: event.id,
+    }
+  }
+  return {
+    type: 'SPAN',
+    name: event.name,
+    input: event.input,
+    output: event.output,
+    startTime: event.timestamp,
+    workflowEventId: event.id,
   }
 }
 
 function buildValidationObservations(
   workflowName: string,
   workflowInput: unknown,
-  workflowOutput: unknown,
   workflowError: string | undefined,
   trace: ReturnType<typeof startTraceSession>['context']['trace'],
+  workflowTrace?: WorkflowTrace,
 ): DashboardObservation[] {
   const steps = trace.getSteps()
-  const lastStepOutput = {
-    "message": "20",
-    "refinedQuery": "What is the attack stat of Metapod?",
-    "topKResults": [
-      {
-        "id": "table-pokemon_stats",
-        "content": "Database Schema:\nTables:\npokemon_stats(pokemon_id, stat_id, base_stat, effort)\n\n-- Example 1\nQuestion: Find me the strongest fire-type pokemon.\nSQL: SELECT p.identifier, SUM(ps.base_stat) as total_stats\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nJOIN pokemon_stats ps ON p.id = ps.pokemon_id\nWHERE t.identifier = 'fire'\nGROUP BY p.id, p.identifier\nORDER BY total_stats DESC\nLIMIT 1;\n\n-- Example 2\nQuestion: What's the lowest attack a grass-type pokemon can have?\nSQL: SELECT MIN(ps.base_stat) as min_attack\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nJOIN pokemon_stats ps ON p.id = ps.pokemon_id\nJOIN stats s ON ps.stat_id = s.id\nWHERE t.identifier = 'grass' AND s.identifier = 'attack';"
-      },
-      {
-        "id": "table-pokemon",
-        "content": "Database Schema:\nTables:\npokemon(id, identifier, species_id, height, weight, base_experience, order, is_default)\n\n-- Example 1\nQuestion: Show pokemon that weigh more than 2000 hectograms.\nSQL: SELECT identifier, weight\nFROM pokemon\nWHERE weight > 2000\nORDER BY weight DESC;\n\n-- Example 2\nQuestion: Find the default form for each pokemon species.\nSQL: SELECT p.identifier, p.height, p.weight\nFROM pokemon p\nWHERE p.is_default = TRUE\nORDER BY p.identifier;"
-      },
-      {
-        "id": "table-pokemon_moves",
-        "content": "Database Schema:\nTables:\npokemon_moves(id, pokemon_id, move_id, version_group_id, move_method_id, level, order_index, mastery)\n\n-- Example 1\nQuestion: What moves can pikachu learn?\nSQL: SELECT m.identifier, pmm.identifier as learn_method, pm.level\nFROM pokemon p\nJOIN pokemon_moves pm ON p.id = pm.pokemon_id\nJOIN moves m ON pm.move_id = m.id\nJOIN pokemon_move_methods pmm ON pm.move_method_id = pmm.id\nWHERE p.identifier = 'pikachu'\nORDER BY pm.level, m.identifier;\n\n-- Example 2\nQuestion: What are the most common moves learned by water-type pokemon?\nSQL: SELECT m.identifier, COUNT(DISTINCT p.id) as pokemon_count\nFROM moves m\nJOIN pokemon_moves pm ON m.id = pm.move_id\nJOIN pokemon p ON pm.pokemon_id = p.id\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nWHERE t.identifier = 'water'\nGROUP BY m.id, m.identifier\nORDER BY pokemon_count DESC\nLIMIT 15;"
-      },
-      {
-        "id": "table-pokemon_species",
-        "content": "Database Schema:\nTables:\npokemon_species(id, identifier, generation_id, evolves_from_species_id, evolution_chain_id, color_id, shape_id, habitat_id, gender_rate, capture_rate, base_happiness, is_baby, hatch_counter, has_gender_differences, growth_rate_id, forms_switchable, is_legendary, is_mythical, order, conquest_order)\n\n-- Example 1\nQuestion: List all legendary pokemon.\nSQL: SELECT identifier\nFROM pokemon_species\nWHERE is_legendary = TRUE\nORDER BY identifier;\n\n-- Example 2\nQuestion: Find pokemon that evolve from pikachu.\nSQL: SELECT ps.identifier\nFROM pokemon_species ps\nJOIN pokemon_species parent ON ps.evolves_from_species_id = parent.id\nWHERE parent.identifier = 'pikachu';"
-      },
-      {
-        "id": "table-pokemon_types",
-        "content": "Database Schema:\nTables:\npokemon_types(pokemon_id, type_id, slot)\n\n-- Example 1\nQuestion: Find all fire-type pokemon.\nSQL: SELECT p.identifier\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nWHERE t.identifier = 'fire'\nORDER BY p.identifier;\n\n-- Example 2\nQuestion: Find dual-type pokemon (pokemon with exactly 2 types).\nSQL: SELECT p.identifier\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nGROUP BY p.id, p.identifier\nHAVING COUNT(*) = 2\nORDER BY p.identifier;"
-      },
-      {
-        "id": "table-abilities",
-        "content": "Database Schema:\nTables:\nabilities(id, identifier, generation_id, is_main_series)\n\n-- Example 1\nQuestion: Show abilities introduced in generation 5 or later.\nSQL: SELECT a.identifier, g.identifier as generation\nFROM abilities a\nJOIN generations g ON a.generation_id = g.id\nWHERE a.generation_id >= 5\nORDER BY a.generation_id, a.identifier;\n\n-- Example 2\nQuestion: Which ability is shared by the most pokemon?\nSQL: SELECT a.identifier, COUNT(DISTINCT pa.pokemon_id) as pokemon_count\nFROM abilities a\nJOIN pokemon_abilities pa ON a.id = pa.ability_id\nGROUP BY a.id, a.identifier\nORDER BY pokemon_count DESC\nLIMIT 10;"
-      },
-      {
-        "id": "table-pokemon_move_methods",
-        "content": "Database Schema:\nTables:\npokemon_move_methods(id, identifier)\n\n-- Example 1\nQuestion: List all move learning methods with move counts.\nSQL: SELECT pmm.identifier as method, COUNT(DISTINCT pm.move_id) as move_count\nFROM pokemon_move_methods pmm\nLEFT JOIN pokemon_moves pm ON pmm.id = pm.move_method_id\nGROUP BY pmm.id, pmm.identifier\nORDER BY move_count DESC;\n\n-- Example 2\nQuestion: Find moves that pikachu learns by leveling up.\nSQL: SELECT m.identifier, pm.level\nFROM pokemon p\nJOIN pokemon_moves pm ON p.id = pm.pokemon_id\nJOIN moves m ON pm.move_id = m.id\nJOIN pokemon_move_methods pmm ON pm.move_method_id = pmm.id\nWHERE p.identifier = 'pikachu' AND pmm.identifier = 'level-up'\nORDER BY pm.level;"
-      },
-      {
-        "id": "table-stats",
-        "content": "Database Schema:\nTables:\nstats(id, damage_class_id, identifier, is_battle_only, game_index)\n\n-- Example 1\nQuestion: Show all battle stats (non-battle-only stats).\nSQL: SELECT identifier\nFROM stats\nWHERE is_battle_only = FALSE\nORDER BY game_index;\n\n-- Example 2\nQuestion: Find which damage classes are associated with which stats.\nSQL: SELECT s.identifier as stat, mdc.identifier as damage_class\nFROM stats s\nLEFT JOIN move_damage_classes mdc ON s.damage_class_id = mdc.id\nWHERE s.damage_class_id IS NOT NULL\nORDER BY s.identifier;"
-      },
-      {
-        "id": "table-UserPokemonTeamMembers",
-        "content": "Database Schema:\nTables:\nUserPokemonTeamMembers(id, team_id, pokemon_id, nickname, level, order_index, moves, shiny, deleted, created_at, created_by, updated_at, updated_by)\n\n-- Example 1\nQuestion: Show all pokemon in team 10 ordered by position.\nSQL: SELECT pokemon_id, nickname, level, shiny\nFROM UserPokemonTeamMembers\nWHERE team_id = 10 AND deleted = FALSE\nORDER BY order_index;\n\n-- Example 2\nQuestion: Find all shiny pokemon across all teams.\nSQL: SELECT tm.team_id, t.team_name, tm.pokemon_id, tm.nickname\nFROM UserPokemonTeamMembers tm\nJOIN UserPokemonTeams t ON tm.team_id = t.id\nWHERE tm.shiny = TRUE AND tm.deleted = FALSE AND t.deleted = FALSE\nORDER BY t.team_name, tm.order_index;"
-      },
-      {
-        "id": "table-generations",
-        "content": "Database Schema:\nTables:\ngenerations(id, main_region_id, identifier)\n\n-- Example 1\nQuestion: How many pokemon were introduced in each generation?\nSQL: SELECT g.identifier as generation, COUNT(DISTINCT ps.id) as pokemon_count\nFROM generations g\nLEFT JOIN pokemon_species ps ON g.id = ps.generation_id\nGROUP BY g.id, g.identifier\nORDER BY g.id;\n\n-- Example 2\nQuestion: Count the number of abilities introduced per generation.\nSQL: SELECT g.identifier as generation, COUNT(*) as ability_count\nFROM generations g\nLEFT JOIN abilities a ON g.id = a.generation_id\nGROUP BY g.id, g.identifier\nORDER BY g.id;"
-      },
-      {
-        "id": "table-pokemon_abilities",
-        "content": "Database Schema:\nTables:\npokemon_abilities(id, pokemon_id, ability_id, is_hidden, slot)\n\n-- Example 1\nQuestion: List all abilities available to pikachu.\nSQL: SELECT a.identifier, pa.is_hidden\nFROM pokemon p\nJOIN pokemon_abilities pa ON p.id = pa.pokemon_id\nJOIN abilities a ON pa.ability_id = a.id\nWHERE p.identifier = 'pikachu'\nORDER BY pa.slot;\n\n-- Example 2\nQuestion: Find hidden abilities for fire-type pokemon.\nSQL: SELECT DISTINCT p.identifier as pokemon, a.identifier as ability\nFROM pokemon p\nJOIN pokemon_types pt ON p.id = pt.pokemon_id\nJOIN types t ON pt.type_id = t.id\nJOIN pokemon_abilities pa ON p.id = pa.pokemon_id\nJOIN abilities a ON pa.ability_id = a.id\nWHERE t.identifier = 'fire' AND pa.is_hidden = TRUE\nORDER BY p.identifier;"
-      },
-      {
-        "id": "table-UserPokemonWatchlist",
-        "content": "Database Schema:\nTables:\nUserPokemonWatchlist(id, pokemon_id, user_id, deleted, created_at, created_by, updated_at, updated_by)\n\n-- Example 1\nQuestion: List all pokemon in user 5's watchlist.\nSQL: SELECT pokemon_id\nFROM UserPokemonWatchlist\nWHERE user_id = 5 AND deleted = FALSE\nORDER BY created_at DESC;\n\n-- Example 2\nQuestion: Find users watching pikachu (pokemon_id = 25).\nSQL: SELECT DISTINCT user_id\nFROM UserPokemonWatchlist\nWHERE pokemon_id = 25 AND deleted = FALSE\nORDER BY user_id;"
-      },
-      {
-        "id": "sql-query",
-        "summary": "Execute SQL query",
-        "tags": [
-          "sql",
-          "query",
-          "table",
-          "database"
-        ],
-        "content": "path: /general/sql/query\nmethod: POST\ntags: sql, query, table, database\nsummary: Execute SQL query\ndescription: Execute a SQL query and return results.\nparameters: query (body): string"
-      }
-    ],
-    "planResponse": "{\"needs_clarification\":false,\"phase\":\"execution\",\"final_deliverable\":\"What is the attack stat of Metapod?\",\"execution_plan\":[{\"step_number\":1,\"description\":\"Execute SQL query to fulfill user request\",\"api\":{\"path\":\"/general/sql/query\",\"method\":\"post\",\"requestBody\":{\"query\":\"SELECT ps.base_stat as attack_stat FROM pokemon p JOIN pokemon_stats ps ON p.id = ps.pokemon_id JOIN stats s ON ps.stat_id = s.id WHERE p.identifier = 'metapod' AND s.identifier = 'attack';\"}}}],\"selected_tools_spec\":[{\"endpoint\":\"POST /general/sql/query\",\"purpose\":\"Execute SQL query\",\"returns\":\"SQL query result\",\"derivations\":[\"query = \\\"SELECT ps.base_stat as attack_stat FROM pokemon p JOIN pokemon_stats ps ON p.id = ps.pokemon_id JOIN stats s ON ps.stat_id = s.id WHERE p.identifier = 'metapod' AND s.identifier = 'attack';\\\"\"]}]}",
-    "planningDurationMs": 5352,
-    "usedReferencePlan": false,
-    "executedTasks": [
-      {
-        "id": "1",
-        "description": "Execute SQL query to fulfill user request",
-        "tool": {
-          "name": "dataService",
-          "description": "Run SELECT queries on database"
-        },
-        "input": {
-          "query": "SELECT ps.base_stat as attack_stat FROM pokemon p JOIN pokemon_stats ps ON p.id = ps.pokemon_id JOIN stats s ON ps.stat_id = s.id WHERE p.identifier = 'metapod' AND s.identifier = 'attack';"
-        },
-        "status": "completed",
-        "output": [
-          {
-            "attack_stat": 20
-          }
-        ]
-      }
-    ]
-  }
 
   const observations: DashboardObservation[] = [
     {
       type: 'SPAN',
       name: workflowName,
       input: workflowInput,
-      output: workflowError ? `Workflow run failed: ${workflowError}` : lastStepOutput,
+      output: workflowError ? `Workflow run failed: ${workflowError}` : `Workflow run failed with unknown error`,
     },
   ]
 
   let firstGenerationIndex = -1
   for (const step of steps) {
-    const obs = toObservationFromStep({ type: step.type, data: step.data })
+    const obs = toObservationFromStep({ type: step.type, data: step.data, timestamp: step.timestamp })
     observations.push(obs)
-    
+
     // Track the index of the first GENERATION observation
     if (firstGenerationIndex === -1 && obs.type === 'GENERATION') {
       firstGenerationIndex = observations.length - 1
     }
   }
 
-  // Insert hardcoded queryRefinement tool call after the first GENERATION
-  if (firstGenerationIndex !== -1) {
-    const hardcodedQueryRefinement: DashboardObservation = {
-      type: 'TOOL',
-      name: 'queryRefinement',
-      input: {
-        userInput: 'What is the attack stat of Metapod?',
-        userToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6Im5vcm1hbHVzZXIiLCJyb2xlIjoiVXNlciIsInNjb3BlSWQiOjIsImVtYWlsIjoidGVycnlqaWFuZzE5OTZAZ21haWwuY29tIiwiaWF0IjoxNzY3Nzc2OTE2LCJleHAiOjE3NzI5NjA5MTZ9.H0yasNMyy8JABSPNlyQoY0LDiDW2M-RVPoTYv1-dYP4',
-      },
-      output: {
-        refinedQuery: 'What is the attack stat of Metapod?',
-        language: 'en',
-        concepts: ['Metapod', 'attack stat'],
-        apiNeeds: ['retrieve pokemon stats'],
-        entities: ['metapod details', 'pokemon stats'],
-        intentType: 'FETCH',
-      },
+  // Append HTTP and DB events from the new capture system
+  if (workflowTrace) {
+    for (const event of workflowTrace.events) {
+      if (event.type === 'http' || event.type === 'db') {
+        observations.push(toObservationFromWorkflowEvent(event))
+      }
     }
-    observations.splice(firstGenerationIndex + 1, 0, hardcodedQueryRefinement)
   }
 
-  // Add hardcoded dataService tool call at the end
-  const hardcodedDataService: DashboardObservation = {
-    type: 'TOOL',
-    name: 'dataService',
-    input: {
-      query: "SELECT ps.base_stat as attack_stat FROM pokemon p JOIN pokemon_stats ps ON p.id = ps.pokemon_id JOIN stats s ON ps.stat_id = s.id WHERE p.identifier = 'metapod' AND s.identifier = 'attack';",
-    },
-    output: [
-      {
-        attack_stat: 20,
-      },
-    ],
-  }
-  observations.push(hardcodedDataService)
-
-  return observations
+  // Sort all observations except the workflow entry (index 0) by startTime
+  const [workflowEntry, ...rest] = observations
+  rest.sort((a, b) => (a.startTime ?? 0) - (b.startTime ?? 0))
+  return [workflowEntry, ...rest]
 }
-
-
 
 async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): Promise<ValidateWorkflowResult> {
   const workflowName = typeof body.workflowName === 'string' ? body.workflowName.trim() : ''
@@ -734,7 +664,8 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
         runNumber,
         ok: false,
         error: result.error,
-        observations: buildValidationObservations(workflowName, workflowInput, undefined, result.error, traceStub),
+        observations: buildValidationObservations(workflowName, workflowInput, result.error, traceStub, result.workflowTrace),
+        workflowTrace: result.workflowTrace,
       }
     }
 
@@ -742,7 +673,8 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
     return {
       runNumber,
       ok: true,
-      observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, undefined, traceStub),
+      observations: buildValidationObservations(workflowName, workflowInput, undefined, traceStub, result.workflowTrace),
+      workflowTrace: result.workflowTrace,
     }
   }
 
@@ -1141,6 +1073,78 @@ export async function startDashboardServer(
           const statusCode = result.ok ? 200 : 400
           res.writeHead(statusCode, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result))
+        } catch (error) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: formatError(error) }))
+        }
+      })()
+    } else if (url.pathname === '/api/run-from-breakpoint' && req.method === 'POST') {
+      ;(async () => {
+        try {
+          const body = (await readJsonBody(req)) as {
+            workflowName?: unknown
+            checkpoint?: unknown
+            history?: unknown
+            observations?: unknown
+          }
+          const workflowName = typeof body.workflowName === 'string' ? body.workflowName.trim() : ''
+          if (!workflowName) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'workflowName is required.' }))
+            return
+          }
+          const checkpoint = typeof body.checkpoint === 'number' ? body.checkpoint : 0
+          const history = Array.isArray(body.history) ? (body.history as WorkflowEvent[]) : []
+
+          const workflowsModulePath = resolveWorkflowModule(cwd)
+          if (!workflowsModulePath) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'Cannot find ed_workflows.ts/js (or ed_workflow.ts/js) in workspace root.' }))
+            return
+          }
+
+          const validationBody: WorkflowValidationBody = { workflowName, observations: body.observations }
+          const resolvedInput = resolveWorkflowArgsFromObservations(validationBody, workflowName)
+          if (resolvedInput.error) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: resolvedInput.error }))
+            return
+          }
+          const workflowArgs = resolvedInput.args ?? []
+          const workflowInput = resolvedInput.input ?? null
+
+          const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools') ?? null
+
+          console.log(`[elasticdash] Run from breakpoint: workflow="${workflowName}" checkpoint=${checkpoint} historyLen=${history.length}`)
+          const result = await runWorkflowInSubprocess(
+            workflowsModulePath,
+            toolsModulePath,
+            workflowName,
+            workflowArgs,
+            workflowInput,
+            { replayMode: true, checkpoint, history },
+          )
+
+          const traceStub = {
+            getSteps: () => (result.steps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getSteps'] extends () => infer R ? R : never,
+            getLLMSteps: () => (result.llmSteps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getLLMSteps'] extends () => infer R ? R : never,
+            getToolCalls: () => (result.toolCalls ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getToolCalls'] extends () => infer R ? R : never,
+            getCustomSteps: () => (result.customSteps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getCustomSteps'] extends () => infer R ? R : never,
+            recordLLMStep: () => {},
+            recordToolCall: () => {},
+            recordCustomStep: () => {},
+          }
+
+          const trace: ValidationRunTrace = {
+            runNumber: 0,
+            ok: result.ok,
+            error: result.ok ? undefined : result.error,
+            observations: buildValidationObservations(workflowName, workflowInput, result.ok ? undefined : result.error, traceStub, result.workflowTrace),
+            workflowTrace: result.workflowTrace,
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(trace))
         } catch (error) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ ok: false, error: formatError(error) }))
