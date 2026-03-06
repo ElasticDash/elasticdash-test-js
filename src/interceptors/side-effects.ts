@@ -3,6 +3,11 @@ import { getCaptureContext } from '../capture/recorder.js'
 let originalRandom: (() => number) | undefined
 let originalDateNow: (() => number) | undefined
 
+/** Call the real Date.now(), bypassing any interception. Safe to call from inside interceptors. */
+export function rawDateNow(): number {
+  return originalDateNow ? originalDateNow() : Date.now()
+}
+
 export function interceptRandom(): void {
   if (originalRandom) return // already installed
   originalRandom = Math.random
@@ -12,20 +17,20 @@ export function interceptRandom(): void {
     if (!ctx) return originalRandom!()
 
     const { recorder, replay } = ctx
-    const id = recorder.nextId()
+    const n = recorder.nextSideEffectId()
 
-    if (replay.shouldReplay(id)) {
-      return replay.getRecordedResult(id) as number
+    if (replay.shouldReplaySideEffect(n)) {
+      return replay.getSideEffectResult(n) as number
     }
 
     const value = originalRandom!()
     recorder.record({
-      id,
+      id: n,
       type: 'side_effect',
       name: 'Math.random',
       input: null,
       output: value,
-      timestamp: Date.now(),
+      timestamp: rawDateNow(),
       durationMs: 0,
     })
 
@@ -49,15 +54,15 @@ export function interceptDateNow(): void {
     if (!ctx) return originalDateNow!()
 
     const { recorder, replay } = ctx
-    const id = recorder.nextId()
+    const n = recorder.nextSideEffectId()
 
-    if (replay.shouldReplay(id)) {
-      return replay.getRecordedResult(id) as number
+    if (replay.shouldReplaySideEffect(n)) {
+      return replay.getSideEffectResult(n) as number
     }
 
     const value = originalDateNow!()
     recorder.record({
-      id,
+      id: n,
       type: 'side_effect',
       name: 'Date.now',
       input: null,

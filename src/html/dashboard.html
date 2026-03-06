@@ -72,6 +72,11 @@
             .run-from-bp-btn { font-size: 11px; padding: 2px 8px; border: 1px solid #bbb; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; white-space: nowrap; }
             .run-from-bp-btn:hover { background: #e0edff; border-color: #5a8fd8; color: #1f5fbf; }
             .run-from-bp-btn:disabled { opacity: 0.6; cursor: default; }
+            .resume-agent-btn { font-size: 11px; padding: 2px 8px; border: 1px solid #b8a0d8; border-radius: 4px; background: #f3eeff; color: #5a2d9c; cursor: pointer; white-space: nowrap; margin-left: 6px; }
+            .resume-agent-btn:hover { background: #e6d8ff; border-color: #7c52b8; color: #3d1f7a; }
+            .resume-agent-btn:disabled { opacity: 0.6; cursor: default; }
+            .agent-task-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #f0e8ff; color: #6a2fb0; border: 1px solid #d4b8f0; margin-left: 6px; font-weight: 600; }
+            .agent-task-row { background: #f7f0ff; border-left: 3px solid #8560c6; }
             .detail-sections { display: flex; flex-direction: column; gap: 12px; height: 486.5px; overflow-y: auto; }
             .detail-section { background: white; border: 1px solid #eee; border-radius: 6px; padding: 10px; }
             .detail-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: #555; text-transform: uppercase; letter-spacing: 0.02em; }
@@ -157,7 +162,22 @@
             let rerunInFlight = new Set();
             let step4SelectedRun = -1;
             let step5RunTraces = [];
+            try {
+                const _saved = localStorage.getItem('ed_step5RunTraces');
+                if (_saved) step5RunTraces = JSON.parse(_saved);
+            } catch {}
             let step5RunMeta = { loading: false, error: '', runCount: 0, sequential: false };
+
+            function persistTraces() {
+                try {
+                    // Store compact version — strip bulky workflowTrace.events (snapshot is on server)
+                    const compact = step5RunTraces.map(function(t) {
+                        const { workflowTrace, ...rest } = t;
+                        return rest;
+                    });
+                    localStorage.setItem('ed_step5RunTraces', JSON.stringify(compact));
+                } catch {}
+            }
             const tbody = document.getElementById("workflowsTableBody");
             const countEl = document.getElementById("resultCount");
             const modal = document.getElementById("traceModal");
@@ -314,9 +334,11 @@
                             updateFooterButtons();
                             if (response.ok && data.ok) {
                                 step5RunTraces = Array.isArray(data.traces) ? data.traces : [];
+                                persistTraces();
                                 step5RunMeta = { loading: false, error: '', runCount: typeof data.runCount === 'number' ? data.runCount : count, sequential: data.mode === 'sequential' };
                             } else {
                                 step5RunTraces = [];
+                                localStorage.removeItem('ed_step5RunTraces');
                                 step5RunMeta = { loading: false, error: data.error || 'Workflow validation failed.', runCount: count, sequential };
                             }
                         } catch (err) {
@@ -328,6 +350,7 @@
                             updateModalTitle();
                             updateFooterButtons();
                             step5RunTraces = [];
+                            localStorage.removeItem('ed_step5RunTraces');
                             step5RunMeta = { loading: false, error: err && err.message ? err.message : String(err), runCount: count, sequential };
                         }
                         if (window.step5SelectedTrace > step5RunTraces.length) window.step5SelectedTrace = 0;
@@ -484,7 +507,7 @@
                         const isSelected = i === window.step5SelectedTrace;
                         const run = i === 0 ? null : traces[i - 1];
                         const status = run ? (run.ok ? ' ✓' : ' ✗') : '';
-                        const label = i === 0 ? "Original Trace" : `Trace ${run?.runNumber ?? i}${status}`;
+                        const label = i === 0 ? "Original Trace" : `${run?.traceName ?? `Trace-${run?.runNumber ?? i}`}${status}`;
                         traceTable += `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedTrace=${i};window.step5SelectedObservation=0;renderObservationTable();"><td>${label}</td></tr>`;
                     }
                     traceTable += `</tbody></table></div>`;
@@ -509,7 +532,9 @@
                             const name = obs.name || obs.id || ("Observation " + (j + 1));
                             const type = obs.type || "UNKNOWN";
                             const typeClass = type === "TOOL" ? "tool" : "ai";
-                            return `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
+                            const agentBadge = obs.agentTaskIndex != null ? `<span class="agent-task-badge">T${obs.agentTaskIndex + 1}</span>` : '';
+                            const rowClass = obs.agentTaskIndex != null ? 'agent-task-row' : '';
+                            return `<tr class="${isSelected ? "selected" : ""} ${rowClass}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}${agentBadge}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
                         }).join("");
                         observationsTable += `</tbody></table></div>`;
                         // Details for selected observation
@@ -551,7 +576,9 @@
                                 const name = action.name || action.id || ("Observation " + (j + 1));
                                 const type = action.type || "UNKNOWN";
                                 const typeClass = type === "TOOL" ? "tool" : "ai";
-                                return `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
+                                const agentBadge = action.agentTaskIndex != null ? `<span class="agent-task-badge">T${action.agentTaskIndex + 1}</span>` : '';
+                                const rowClass = action.agentTaskIndex != null ? 'agent-task-row' : '';
+                                return `<tr class="${isSelected ? "selected" : ""} ${rowClass}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}${agentBadge}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
                             }).join("");
                             observationsTable += `</tbody></table></div>`;
                             // Details for selected observation
@@ -574,13 +601,19 @@
                                     </div>`;
                                 }
                                 
-                                const runFromBpHtml = obs.workflowEventId != null
-                                    ? `<div class="detail-section" style="padding:8px 12px;"><button class="run-from-bp-btn" onclick="runFromBreakpoint(${traceIdx},${window.step5SelectedObservation},event)">&#9654; Run from here</button></div>`
-                                    : '';
+                                // Agent steps: always show "Resume from Task X" button
+                                // Non-agent steps: show "Run from here" only if they have workflowEventId (HTTP/DB events)
+                                // Steps without agentTaskIndex and without workflowEventId get no button
+                                let runFromBpHtml = '';
+                                if (obs.agentTaskIndex != null) {
+                                    runFromBpHtml = `<div class="detail-section" style="padding:8px 12px;"><button class="resume-agent-btn" onclick="resumeAgentFromTask(${traceIdx},${window.step5SelectedObservation},${obs.agentTaskIndex},event)">&#9654; Resume from Task ${obs.agentTaskIndex + 1}</button></div>`;
+                                } else if (obs.workflowEventId != null) {
+                                    runFromBpHtml = `<div class="detail-section" style="padding:8px 12px;"><button class="run-from-bp-btn" onclick="runFromBreakpoint(${traceIdx},${window.step5SelectedObservation},event)">&#9654; Run from here</button></div>`;
+                                }
                                 detailsSection = `<div class="detail-sections" id="${detailId}">
                                 ${filePathHtml}
-                                ${renderModel(obs)}
                                 ${runFromBpHtml}
+                                ${renderModel(obs)}
                                 <div class="detail-section">
                                     <div class="detail-title">Input</div>
                                     <pre class="detail-pre">${esc(inputText)}</pre>
@@ -911,9 +944,7 @@
                     const payload = {
                         workflowName: selectedWorkflow ? selectedWorkflow.name : '',
                         checkpoint: obs.workflowEventId,
-                        history: (liveTrace.workflowTrace && Array.isArray(liveTrace.workflowTrace.events))
-                            ? liveTrace.workflowTrace.events
-                            : [],
+                        snapshotId: liveTrace.snapshotId,
                         observations: currentObservations,
                     };
                     const response = await fetch('/api/run-from-breakpoint', {
@@ -923,9 +954,67 @@
                     });
                     const data = await response.json();
                     if (response.ok) {
-                        const newTrace = { ...data, runNumber: step5RunTraces.length + 1 };
+                        // Sub-trace naming: "Trace-N-M" where N = parent name, M = resume count from parent
+                        const parentTraceName = liveTrace.traceName ?? `Trace-${traceIdx + 1}`;
+                        const siblingCount = step5RunTraces.filter(t => t.parentTraceName === parentTraceName).length;
+                        const traceName = `${parentTraceName}-${siblingCount + 1}`;
+                        const newTrace = { ...data, runNumber: step5RunTraces.length + 1, traceName, parentTraceName };
                         step5RunTraces.push(newTrace);
-                        // Stay on the current trace — user can click the new trace in the list
+                        persistTraces();
+                        renderObservationTable();
+                    } else {
+                        btn.textContent = '✗ ' + (data.error || 'Failed');
+                        btn.disabled = false;
+                    }
+                } catch (err) {
+                    btn.textContent = '✗ Error';
+                    btn.disabled = false;
+                }
+            }
+
+            async function resumeAgentFromTask(traceIdx, obsIdx, taskIndex, evt) {
+                const btn = evt.target;
+                const liveTrace = step5RunTraces[traceIdx];
+                if (!liveTrace) return;
+
+                // Extract AgentPlan from the workflow's currentOutput
+                const currentOutput = liveTrace.currentOutput;
+                const agentPlan = currentOutput && typeof currentOutput === 'object' && Array.isArray(currentOutput.tasks)
+                    ? currentOutput
+                    : null;
+                if (!agentPlan) {
+                    alert('No agent plan found in this trace. Ensure the workflow returns an AgentPlan from executorAgent() or resumeAgentFromTrace().');
+                    return;
+                }
+
+                btn.disabled = true;
+                btn.textContent = 'Resuming…';
+
+                try {
+                    const payload = {
+                        workflowName: selectedWorkflow ? selectedWorkflow.name : '',
+                        taskIndex: taskIndex,
+                        agentState: {
+                            plan: agentPlan,
+                            trace: [],
+                            resumeFromTaskIndex: taskIndex,
+                        },
+                        snapshotId: liveTrace.snapshotId,
+                    };
+                    const response = await fetch('/api/resume-agent-from-task', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        // Sub-trace naming: "Trace-N-M" where N = parent name, M = resume count from parent
+                        const parentTraceName = liveTrace.traceName ?? `Trace-${traceIdx + 1}`;
+                        const siblingCount = step5RunTraces.filter(t => t.parentTraceName === parentTraceName).length;
+                        const traceName = `${parentTraceName}-${siblingCount + 1}`;
+                        const newTrace = { ...data, runNumber: step5RunTraces.length + 1, traceName, parentTraceName };
+                        step5RunTraces.push(newTrace);
+                        persistTraces();
                         renderObservationTable();
                     } else {
                         btn.textContent = '✗ ' + (data.error || 'Failed');
@@ -970,7 +1059,11 @@
                 if (!obs || obs.type !== "GENERATION") return null;
                 let input = obs.input;
                 // Parse input if it's a JSON string
-                if (typeof input === 'string') {
+                if (
+                    typeof input === 'string' && 
+                    (input.startsWith('{') || input.startsWith('[')) &&
+                    (input.endsWith('}') || input.endsWith(']'))
+                ) {
                     try {
                         input = JSON.parse(input);
                     } catch { /* not JSON */ }
@@ -1119,6 +1212,7 @@
                 rerunInFlight.clear();
                 step4SelectedRun = -1;
                 step5RunTraces = [];
+                localStorage.removeItem('ed_step5RunTraces');
                 step5RunMeta = { loading: false, error: '', runCount: 0, sequential: false };
                 observationTableBody.innerHTML = "";
                 observationDetail.innerHTML = "";

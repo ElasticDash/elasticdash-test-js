@@ -23,3 +23,6 @@ export { interceptFetch, restoreFetch } from './interceptors/http.js'
 export { interceptRandom, restoreRandom, interceptDateNow, restoreDateNow } from './interceptors/side-effects.js'
 export { runWorkflow } from './workflow-runner.js'
 export type { RunWorkflowOptions, WorkflowRunResult } from './workflow-runner.js'
+// Agent mid-trace replay
+export type { AgentTask, AgentPlan, AgentState, AgentTaskStatus, AgentPlanStatus } from './types/agent.js'
+export { serializeAgentState, deserializeAgentState, extractTaskOutputs, resolveTaskInput } from './core/agent-state.js'

@@ -458,6 +458,111 @@ The dashboard command will scan these files and display all exported functions w
 
 ---
 
+## Agent Mid-Trace Replay
+
+ElasticDash supports resuming a long-running agent from any task in its plan — without re-executing already-completed steps. This is useful for:
+
+- **Resuming after failures**: If task 3 of 5 fails, fix the issue and re-run from task 3 only.
+- **Pausing for approval**: Capture state after task 2, get human sign-off, then continue.
+- **Debugging in isolation**: Re-run a single task with modified input to diagnose a problem.
+
+### How it works
+
+Agents are structured as an **AgentPlan** — an ordered list of **AgentTask** objects, each with a tool name, input, and output. When serialized, the plan plus all captured trace events form an **AgentState** that can be saved to disk/database and replayed later.
+
+### Quick start
+
+```ts
+import { plannerAgent, executorAgent, resumeAgentFromTrace } from './ed_agents'
+import { serializeAgentState, deserializeAgentState } from 'elasticdash-test'
+import fs from 'node:fs'
+
+// 1. Generate a plan
+const plan = await plannerAgent('Show me sales for Q1', { userToken: 'tok-abc' })
+
+// 2. Execute the plan (runs all tasks sequentially)
+const completedPlan = await executorAgent(plan)
+
+// 3. Serialize and save state (e.g., after partial execution)
+const state = serializeAgentState(completedPlan, [] /* pass recorder.events in worker context */)
+fs.writeFileSync('agent-state.json', JSON.stringify(state, null, 2))
+
+// 4. Later: load saved state and resume from task 2 (0-based index 1)
+const savedState = JSON.parse(fs.readFileSync('agent-state.json', 'utf8'))
+const stateToResume = deserializeAgentState({ ...savedState, resumeFromTaskIndex: 1 })
+const resumedPlan = await resumeAgentFromTrace(stateToResume)
+
+console.log('Resumed plan status:', resumedPlan.status)
+console.log('Task outputs:', resumedPlan.tasks.map((t) => ({ id: t.id, status: t.status })))
+```
+
+### AgentState structure
+
+```ts
+interface AgentState {
+  plan: AgentPlan               // Full plan with all tasks (completed and pending)
+  trace: WorkflowEvent[]        // Captured trace events from previous execution
+  resumeFromTaskIndex: number   // Zero-based index — tasks before this are loaded from cache
+}
+
+interface AgentPlan {
+  id: string
+  tasks: AgentTask[]
+  status: 'planning' | 'executing' | 'completed' | 'failed' | 'paused'
+  currentTaskIndex: number
+  context: Record<string, unknown>
+  metadata: Record<string, unknown>
+}
+
+interface AgentTask {
+  id: string
+  status: 'pending' | 'in-progress' | 'completed' | 'failed'
+  description: string
+  tool: string          // Name of the tool function to invoke
+  input: unknown        // May contain { $ref: "task-N.output.fieldName" } placeholders
+  output?: unknown      // Populated after execution
+  error?: string
+  startedAt?: number
+  completedAt?: number
+}
+```
+
+### Task input placeholders
+
+Task inputs can reference previous task outputs using `{ $ref: "taskId.output.fieldPath" }`:
+
+```ts
+// task-2 uses the embedding produced by task-1
+{
+  id: 'task-2',
+  tool: 'taskSelectorService',
+  input: {
+    queryEmbedding: { $ref: 'task-1.output.embedding' },
+    topK: 3,
+  }
+}
+```
+
+Placeholders are resolved at execution time by `resolveTaskInput()`.
+
+### Dashboard integration
+
+When running an agent workflow through the dashboard:
+
+1. Agent task observations are **visually highlighted** with a purple background and left border, making them easy to identify.
+2. Each agent observation shows a **T1 / T2 / T3** badge indicating which task it belongs to.
+3. In the observation detail panel, a **"Resume from Task N"** button appears (agent steps only — non-agent steps have no button).
+4. Clicking it calls `/api/resume-agent-from-task` with the serialized `AgentState` and the chosen `taskIndex`, then adds the resumed run as a new trace in the comparison table.
+
+### Best practices for resumable agents
+
+- **Keep tasks idempotent** where possible — if a task must be re-run, ensure it produces the same result.
+- **Store minimal outputs** — only record what downstream tasks need, not full API responses.
+- **Version your state schema** — if tool interfaces change, old states may need migration.
+- **Use sequential tasks** — the current implementation runs tasks one-by-one; parallel task support is a planned future enhancement.
+
+---
+
 ## Project Structure
 
 ```

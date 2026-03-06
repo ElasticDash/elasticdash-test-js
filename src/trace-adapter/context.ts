@@ -4,12 +4,14 @@ export interface LLMStep {
   prompt?: string
   completion?: string
   contains?: string
+  workflowEventId?: number
 }
 
 export interface ToolCall {
   name: string
   args?: Record<string, unknown>
   result?: unknown
+  workflowEventId?: number
 }
 
 export type CustomStepKind = 'rag' | 'code' | 'fixed' | 'custom'
@@ -54,6 +56,7 @@ export interface AITestContext {
 
 // --- AsyncLocalStorage-backed current trace (parallel-safe) ---
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { rawDateNow } from '../interceptors/side-effects.js'
 
 const g = globalThis as Record<string, unknown>
 const TRACE_ALS_KEY = '__elasticdash_trace_als__'
@@ -108,7 +111,7 @@ export function createTraceHandle(): TraceHandle {
       llmSteps.push(step)
       steps.push({
         type: 'llm',
-        timestamp: Date.now(),
+        timestamp: rawDateNow(),
         durationMs: 0,
         data: step as unknown as Record<string, unknown>,
       })
@@ -118,7 +121,7 @@ export function createTraceHandle(): TraceHandle {
       toolCalls.push(call)
       steps.push({
         type: 'tool',
-        timestamp: Date.now(),
+        timestamp: rawDateNow(),
         durationMs: 0,
         data: call as unknown as Record<string, unknown>,
       })
@@ -128,7 +131,7 @@ export function createTraceHandle(): TraceHandle {
       customSteps.push(step)
       steps.push({
         type: 'custom',
-        timestamp: Date.now(),
+        timestamp: rawDateNow(),
         durationMs: 0,
         data: step as unknown as Record<string, unknown>,
       })

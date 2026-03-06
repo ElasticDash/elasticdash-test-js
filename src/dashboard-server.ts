@@ -1,11 +1,12 @@
 import http from 'node:http'
 import path from 'node:path'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'url'
 import { callProviderLLM } from './matchers/index.js'
 import { startTraceSession } from './trace-adapter/context.js'
 import type { WorkflowTrace, WorkflowEvent } from './capture/event.js'
+import type { AgentState, AgentPlan } from './types/agent.js'
 import chokidar from 'chokidar';
 import express from 'express';
 import { Worker } from 'worker_threads';
@@ -70,6 +71,10 @@ interface DashboardObservation {
   }
   startTime?: number
   workflowEventId?: number
+  /** Agent task ID that produced this observation (if agent workflow) */
+  agentTaskId?: string
+  /** Zero-based agent task index that produced this observation */
+  agentTaskIndex?: number
 }
 
 interface RerunResult {
@@ -91,6 +96,9 @@ interface ValidationRunTrace {
   observations: DashboardObservation[]
   workflowTrace?: WorkflowTrace
   error?: string
+  /** The return value of the workflow function (e.g. an AgentPlan for agent workflows) */
+  currentOutput?: unknown
+  snapshotId?: string
 }
 
 interface ValidateWorkflowResult {
@@ -101,6 +109,22 @@ interface ValidateWorkflowResult {
   error?: string
 }
 
+function saveSnapshot(cwd: string, workflowTrace: WorkflowTrace): string {
+  const dir = path.join(cwd, '.temp', 'snapshots')
+  mkdirSync(dir, { recursive: true })
+  const id = workflowTrace.traceId
+  writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(workflowTrace), 'utf8')
+  return id
+}
+
+function loadSnapshot(cwd: string, snapshotId: string): WorkflowTrace | null {
+  try {
+    const file = path.join(cwd, '.temp', 'snapshots', `${snapshotId}.json`)
+    return JSON.parse(readFileSync(file, 'utf8')) as WorkflowTrace
+  } catch {
+    return null
+  }
+}
 
 function resolveRuntimeModule(cwd: string, baseName: string): string | null {
   for (const ext of ['.ts', '.tsx', '.js', '.jsx']) {
@@ -309,7 +333,7 @@ function runWorkflowInSubprocess(
   workflowName: string,
   args: unknown[],
   input: unknown,
-  options?: { replayMode?: boolean; checkpoint?: number; history?: WorkflowEvent[] },
+  options?: { replayMode?: boolean; checkpoint?: number; history?: WorkflowEvent[]; agentState?: AgentState },
 ): Promise<WorkflowSubprocessResult> {
   return new Promise((resolve) => {
     const workerScript = new URL('./workflow-runner-worker.js', import.meta.url).pathname
@@ -362,6 +386,7 @@ function runWorkflowInSubprocess(
       ...(options?.replayMode !== undefined ? { replayMode: options.replayMode } : {}),
       ...(options?.checkpoint !== undefined ? { checkpoint: options.checkpoint } : {}),
       ...(options?.history !== undefined ? { history: options.history } : {}),
+      ...(options?.agentState !== undefined ? { agentState: options.agentState } : {}),
     })
     child.stdin.write(payload)
     child.stdin.end() // Always close stdin to avoid subprocess hang
@@ -492,6 +517,7 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
       input: step.data.prompt,
       output: step.data.completion,
       startTime: step.timestamp,
+      workflowEventId: typeof step.data.workflowEventId === 'number' ? step.data.workflowEventId : undefined,
     }
   }
 
@@ -502,6 +528,7 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
       input: step.data.args,
       output: step.data.result,
       startTime: step.timestamp,
+      workflowEventId: typeof step.data.workflowEventId === 'number' ? step.data.workflowEventId : undefined,
     }
   }
 
@@ -515,6 +542,86 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
 }
 
 function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservation {
+  const agentFields: Pick<DashboardObservation, 'agentTaskId' | 'agentTaskIndex'> = {}
+  if (event.agentTaskId !== undefined) agentFields.agentTaskId = event.agentTaskId
+  if (event.agentTaskIndex !== undefined) agentFields.agentTaskIndex = event.agentTaskIndex
+
+  if (event.type === 'ai') {
+    const inp = event.input as { provider?: string; model?: string; prompt?: string } | null
+    const out = event.output as Record<string, unknown> | null
+    const provider = inp?.provider ?? ''
+    let completion = ''
+    if (out) {
+      if (out.streamed === true && typeof out.completion === 'string') {
+        completion = out.completion
+      } else if (provider === 'gemini') {
+        const candidates = out.candidates
+        if (Array.isArray(candidates) && candidates.length > 0) {
+          const first = candidates[0] as Record<string, unknown>
+          if (first.content && typeof first.content === 'object') {
+            const parts = (first.content as Record<string, unknown>).parts
+            if (Array.isArray(parts) && parts.length > 0) {
+              completion = String((parts[0] as Record<string, unknown>).text ?? '')
+            }
+          }
+        }
+      } else {
+        const choices = out.choices
+        if (Array.isArray(choices) && choices.length > 0) {
+          const first = choices[0] as Record<string, unknown>
+          if (first.message && typeof first.message === 'object') {
+            completion = String((first.message as Record<string, unknown>).content ?? '')
+          } else if (typeof first.text === 'string') {
+            completion = first.text
+          }
+        }
+        // Embedding response: data[].embedding
+        if (!completion) {
+          const data = out.data
+          if (Array.isArray(data) && data.length > 0) {
+            const first = data[0] as Record<string, unknown>
+            if (Array.isArray(first?.embedding)) {
+              completion = `[${data.length} embedding(s), ${first.embedding.length} dimensions]`
+            }
+          }
+        }
+        // Gemini embedding response: embeddings[].values
+        if (!completion) {
+          const embeddings = out.embeddings
+          if (Array.isArray(embeddings) && embeddings.length > 0) {
+            const first = embeddings[0] as Record<string, unknown>
+            if (Array.isArray(first?.values)) {
+              completion = `[${embeddings.length} embedding(s), ${first.values.length} dimensions]`
+            }
+          }
+        }
+      }
+    }
+    return {
+      type: 'GENERATION',
+      name: provider || 'llm',
+      provider: provider || undefined,
+      model: inp?.model ?? event.name,
+      input: inp?.prompt,
+      output: completion,
+      startTime: event.timestamp,
+      workflowEventId: event.id,
+      ...agentFields,
+    }
+  }
+
+  if (event.type === 'tool') {
+    return {
+      type: 'TOOL',
+      name: event.name,
+      input: event.input,
+      output: event.output,
+      startTime: event.timestamp,
+      workflowEventId: event.id,
+      ...agentFields,
+    }
+  }
+
   if (event.type === 'http') {
     const inp = event.input as { url?: string; method?: string } | undefined
     return {
@@ -524,6 +631,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
       output: event.output,
       startTime: event.timestamp,
       workflowEventId: event.id,
+      ...agentFields,
     }
   }
   if (event.type === 'db') {
@@ -534,6 +642,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
       output: event.output,
       startTime: event.timestamp,
       workflowEventId: event.id,
+      ...agentFields,
     }
   }
   return {
@@ -543,6 +652,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
     output: event.output,
     startTime: event.timestamp,
     workflowEventId: event.id,
+    ...agentFields,
   }
 }
 
@@ -555,6 +665,7 @@ function buildValidationObservations(
   workflowTrace?: WorkflowTrace,
 ): DashboardObservation[] {
   const steps = trace.getSteps()
+  const workflowStartTime = steps.length > 0 ? steps[0].timestamp : Date.now()
 
   const observations: DashboardObservation[] = [
     {
@@ -562,11 +673,18 @@ function buildValidationObservations(
       name: workflowName,
       input: workflowInput,
       output: workflowError ? `Workflow run failed: ${workflowError}` : workflowOutput,
+      startTime: workflowStartTime,
     },
   ]
 
+  // If workflowTrace has ai/tool events, use those as the source of truth to avoid duplicates
+  const hasAiEvents = workflowTrace?.events.some(e => e.type === 'ai') ?? false
+  const hasToolEvents = workflowTrace?.events.some(e => e.type === 'tool') ?? false
+
   let firstGenerationIndex = -1
   for (const step of steps) {
+    if (hasAiEvents && step.type === 'llm') continue
+    if (hasToolEvents && step.type === 'tool') continue
     const obs = toObservationFromStep({ type: step.type, data: step.data, timestamp: step.timestamp })
     observations.push(obs)
 
@@ -576,11 +694,15 @@ function buildValidationObservations(
     }
   }
 
-  // Append HTTP and DB events from the new capture system
+  // Append captured events from the workflow trace (ai, tool, http, db)
   if (workflowTrace) {
     for (const event of workflowTrace.events) {
-      if (event.type === 'http' || event.type === 'db') {
-        observations.push(toObservationFromWorkflowEvent(event))
+      if (event.type === 'ai' || event.type === 'tool' || event.type === 'http' || event.type === 'db') {
+        const obs = toObservationFromWorkflowEvent(event)
+        observations.push(obs)
+        if (firstGenerationIndex === -1 && obs.type === 'GENERATION') {
+          firstGenerationIndex = observations.length - 1
+        }
       }
     }
   }
@@ -667,6 +789,8 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
         error: result.error,
         observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, result.error, traceStub, result.workflowTrace),
         workflowTrace: result.workflowTrace,
+        currentOutput: result.currentOutput,
+        snapshotId: result.workflowTrace ? saveSnapshot(cwd, result.workflowTrace) : undefined,
       }
     }
 
@@ -676,6 +800,8 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
       ok: true,
       observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, undefined, traceStub, result.workflowTrace),
       workflowTrace: result.workflowTrace,
+      currentOutput: result.currentOutput,
+      snapshotId: result.workflowTrace ? saveSnapshot(cwd, result.workflowTrace) : undefined,
     }
   }
 
@@ -1034,6 +1160,8 @@ export async function startDashboardServer(
   
   // Create HTTP server
   const server = http.createServer((req, res) => {
+    // Disable socket inactivity timeout — workflow runs can take arbitrarily long
+    req.socket.setTimeout(0)
     const url = new URL(req.url || '/', `http://${req.headers.host}`)
     
     if (url.pathname === '/api/workflows') {
@@ -1086,6 +1214,7 @@ export async function startDashboardServer(
             workflowName?: unknown
             checkpoint?: unknown
             history?: unknown
+            snapshotId?: unknown
             observations?: unknown
           }
           const workflowName = typeof body.workflowName === 'string' ? body.workflowName.trim() : ''
@@ -1095,7 +1224,13 @@ export async function startDashboardServer(
             return
           }
           const checkpoint = typeof body.checkpoint === 'number' ? body.checkpoint : 0
-          const history = Array.isArray(body.history) ? (body.history as WorkflowEvent[]) : []
+          let history: WorkflowEvent[]
+          if (typeof body.snapshotId === 'string') {
+            const snap = loadSnapshot(cwd, body.snapshotId)
+            history = snap ? snap.events : []
+          } else {
+            history = Array.isArray(body.history) ? (body.history as WorkflowEvent[]) : []
+          }
 
           const workflowsModulePath = resolveWorkflowModule(cwd)
           if (!workflowsModulePath) {
@@ -1136,12 +1271,15 @@ export async function startDashboardServer(
             recordCustomStep: () => {},
           }
 
+          const snapshotId = result.workflowTrace ? saveSnapshot(cwd, result.workflowTrace) : undefined
           const trace: ValidationRunTrace = {
             runNumber: 0,
             ok: result.ok,
             error: result.ok ? undefined : result.error,
             observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, result.ok ? undefined : result.error, traceStub, result.workflowTrace),
             workflowTrace: result.workflowTrace,
+            currentOutput: result.currentOutput,
+            snapshotId,
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -1151,6 +1289,110 @@ export async function startDashboardServer(
           res.end(JSON.stringify({ ok: false, error: formatError(error) }))
         }
       })()
+    } else if (url.pathname === '/api/resume-agent-from-task' && req.method === 'POST') {
+      ;(async () => {
+        try {
+          const body = (await readJsonBody(req)) as {
+            workflowName?: unknown
+            taskIndex?: unknown
+            agentState?: unknown
+            history?: unknown
+            snapshotId?: unknown
+          }
+
+          const workflowName = typeof body.workflowName === 'string' ? body.workflowName.trim() : ''
+          if (!workflowName) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'workflowName is required.' }))
+            return
+          }
+
+          const taskIndex = typeof body.taskIndex === 'number' ? body.taskIndex : 0
+          let history: WorkflowEvent[]
+          if (typeof body.snapshotId === 'string') {
+            const snap = loadSnapshot(cwd, body.snapshotId)
+            history = snap ? snap.events : []
+          } else {
+            history = Array.isArray(body.history) ? (body.history as WorkflowEvent[]) : []
+          }
+
+          if (!body.agentState || typeof body.agentState !== 'object') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'agentState is required.' }))
+            return
+          }
+
+          // Reconstruct AgentState: override resumeFromTaskIndex with the requested taskIndex
+          const incomingState = body.agentState as AgentPlan & { plan?: AgentPlan; resumeFromTaskIndex?: number; trace?: WorkflowEvent[] }
+          const agentState: AgentState = {
+            plan: (incomingState.plan ?? incomingState) as AgentPlan,
+            trace: incomingState.trace ?? history,
+            resumeFromTaskIndex: taskIndex,
+          }
+
+          const workflowsModulePath = resolveWorkflowModule(cwd)
+          if (!workflowsModulePath) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'Cannot find ed_workflows.ts/js in workspace root.' }))
+            return
+          }
+
+          const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools') ?? null
+
+          console.log(`[elasticdash] Resume agent from task: workflow="${workflowName}" taskIndex=${taskIndex}`)
+
+          const result = await runWorkflowInSubprocess(
+            workflowsModulePath,
+            toolsModulePath,
+            workflowName,
+            [],
+            null,
+            { replayMode: history.length > 0, checkpoint: 0, history, agentState },
+          )
+
+          const traceStub = {
+            getSteps: () => (result.steps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getSteps'] extends () => infer R ? R : never,
+            getLLMSteps: () => (result.llmSteps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getLLMSteps'] extends () => infer R ? R : never,
+            getToolCalls: () => (result.toolCalls ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getToolCalls'] extends () => infer R ? R : never,
+            getCustomSteps: () => (result.customSteps ?? []) as ReturnType<typeof import('./trace-adapter/context.js').createTraceHandle>['getCustomSteps'] extends () => infer R ? R : never,
+            recordLLMStep: () => {},
+            recordToolCall: () => {},
+            recordCustomStep: () => {},
+          }
+
+          const snapshotId = result.workflowTrace ? saveSnapshot(cwd, result.workflowTrace) : undefined
+          const trace: ValidationRunTrace = {
+            runNumber: 0,
+            ok: result.ok,
+            error: result.ok ? undefined : result.error,
+            observations: buildValidationObservations(workflowName, null, result.currentOutput, result.ok ? undefined : result.error, traceStub, result.workflowTrace),
+            workflowTrace: result.workflowTrace,
+            currentOutput: result.currentOutput,
+            snapshotId,
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(trace))
+        } catch (error) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: formatError(error) }))
+        }
+      })()
+    } else if (url.pathname === '/api/snapshots' && req.method === 'GET') {
+      const id = url.searchParams.get('id')
+      if (!id) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'id is required.' }))
+      } else {
+        const snap = loadSnapshot(cwd, id)
+        if (!snap) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: 'Snapshot not found.' }))
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(snap))
+        }
+      }
     } else {
       res.writeHead(200, { 'Content-Type': 'text/html' })
       res.end(getDashboardHtml())
@@ -1162,17 +1404,32 @@ export async function startDashboardServer(
     server.listen(port, () => resolve())
     server.on('error', reject)
   })
-  
+
+  const snapshotsDir = path.join(cwd, '.temp', 'snapshots')
+  function cleanupSnapshots() {
+    try {
+      if (existsSync(snapshotsDir)) rmSync(snapshotsDir, { recursive: true, force: true })
+    } catch { /* best-effort */ }
+  }
+
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(sig, () => {
+      cleanupSnapshots()
+      process.exit(0)
+    })
+  }
+
   const url = `http://localhost:${port}`
-  
+
   // Auto-open browser
   if (autoOpen) {
     openBrowser(url)
   }
-  
+
   return {
     url,
     async close() {
+      cleanupSnapshots()
       return new Promise<void>((resolve, reject) => {
         server.close((err) => {
           if (err) reject(err)

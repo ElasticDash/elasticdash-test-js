@@ -6,6 +6,7 @@ import type { ReplayController } from './replay.js'
 export class TraceRecorder {
   events: WorkflowEvent[] = []
   private _counter = 0
+  private _sideEffectCounter = 0
 
   record(event: WorkflowEvent): void {
     this.events.push(event)
@@ -13,6 +14,11 @@ export class TraceRecorder {
 
   nextId(): number {
     return ++this._counter
+  }
+
+  /** Separate counter for Date.now / Math.random — never shares IDs with main events. */
+  nextSideEffectId(): number {
+    return ++this._sideEffectCounter
   }
 
   toTrace(traceId?: string): WorkflowTrace {

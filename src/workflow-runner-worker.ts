@@ -15,14 +15,15 @@ import 'dotenv/config'
 
 import { startTraceSession, setCurrentTrace } from './trace-adapter/context.js'
 import { installAIInterceptor, uninstallAIInterceptor } from './interceptors/ai-interceptor.js'
-import { TraceRecorder, setCaptureContext } from './capture/recorder.js'
+import { TraceRecorder, setCaptureContext, getCaptureContext } from './capture/recorder.js'
 import { ReplayController } from './capture/replay.js'
 import { interceptFetch, restoreFetch } from './interceptors/http.js'
-import { interceptRandom, restoreRandom, interceptDateNow, restoreDateNow } from './interceptors/side-effects.js'
+import { interceptRandom, restoreRandom, interceptDateNow, restoreDateNow, rawDateNow } from './interceptors/side-effects.js'
 import { installDBAutoInterceptor, uninstallDBAutoInterceptor } from './interceptors/db-auto.js'
 import { pathToFileURL } from 'url'
 import type { TraceHandle } from './trace-adapter/context.js'
 import type { WorkflowEvent } from './capture/event.js'
+import type { AgentState } from './types/agent.js'
 import fs from 'node:fs'
 
 async function readStdin(): Promise<string> {
@@ -63,19 +64,34 @@ async function loadAndWrapTools(
       if (typeof fn !== 'function') continue
       wrapped[name] = new Proxy(fn as (...a: unknown[]) => unknown, {
         apply(target, thisArg, args) {
-          // Record tool call arguments as: args.length === 1 ? args[0] : args
           const recordedArgs = args.length === 1 ? args[0] : args
+          const ctx = getCaptureContext()
+          const id = ctx ? ctx.recorder.nextId() : -1
+          const start = rawDateNow()
+
+          // Replay: return historical result without executing
+          if (ctx && ctx.replay.shouldReplay(id)) {
+            const historical = ctx.replay.getRecordedEvent(id)
+            if (historical) ctx.recorder.record(historical)
+            const replayed = ctx.replay.getRecordedResult(id)
+            trace.recordToolCall({ name, args: recordedArgs, result: replayed, workflowEventId: id })
+            return replayed
+          }
+
           const result = Reflect.apply(target, thisArg, args)
           if (result && typeof (result as Promise<unknown>).then === 'function') {
             return (result as Promise<unknown>).then((v: unknown) => {
-              trace.recordToolCall({ name, args: recordedArgs, result: v })
+              if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: v, timestamp: start, durationMs: rawDateNow() - start })
+              trace.recordToolCall({ name, args: recordedArgs, result: v, workflowEventId: id })
               return v
             }).catch((e: unknown) => {
-              trace.recordToolCall({ name, args: recordedArgs, result: { error: String(e) } })
+              if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: { error: String(e) }, timestamp: start, durationMs: rawDateNow() - start })
+              trace.recordToolCall({ name, args: recordedArgs, result: { error: String(e) }, workflowEventId: id })
               throw e
             })
           }
-          trace.recordToolCall({ name, args: recordedArgs, result })
+          if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: result, timestamp: start, durationMs: rawDateNow() - start })
+          trace.recordToolCall({ name, args: recordedArgs, result, workflowEventId: id })
           return result
         },
       })
@@ -101,6 +117,8 @@ async function main() {
     replayMode?: boolean
     checkpoint?: number
     history?: WorkflowEvent[]
+    /** Optional agent state for mid-trace agent resumption */
+    agentState?: AgentState
   }
   try {
     payload = JSON.parse(raw)
@@ -110,7 +128,7 @@ async function main() {
     return
   }
 
-  const { workflowsModulePath, toolsModulePath, workflowName, args, input, replayMode = false, checkpoint = 0, history = [] } = payload
+  const { workflowsModulePath, toolsModulePath, workflowName, args, input, replayMode = false, checkpoint = 0, history = [], agentState } = payload
 
   const { context, finalise } = startTraceSession()
   setCurrentTrace(context.trace)
@@ -149,26 +167,37 @@ async function main() {
   let workflowError: Error | undefined
 
   try {
-    // Use absolute file URL for ESM import
-    const workflowsMod = await import(pathToFileURL(workflowsModulePath).href)
-    const workflowFn = workflowsMod[workflowName]
-    if (typeof workflowFn !== 'function') {
-      ;(process as NodeJS.Process).exit = originalExit
-      await writeResult({ ok: false, error: `"${workflowName}" is not an exported function in the workflow module.` })
-      originalExit(1)
-      return
-    }
-
     await installDBAutoInterceptor()
     installAIInterceptor()
     interceptFetch()
     interceptRandom()
     interceptDateNow()
+
     try {
-      // Standardize workflow argument resolution: always pass [input] if args is empty
-      const callArgs = args.length ? args : [input]
-      currentOutput = await (workflowFn as (...a: unknown[]) => unknown)(...callArgs)
-      console.error('[worker] workflowFn resolved, currentOutput:', currentOutput)  // stderr so it's visible
+      if (agentState) {
+        // Agent mid-trace resumption path: load ed_agents and resume from saved state
+        const agentsModulePath = workflowsModulePath.replace(/ed_workflows(\.[^.]+)?$/, 'ed_agents$1')
+        const agentsMod = await import(pathToFileURL(agentsModulePath).href)
+        if (typeof agentsMod.resumeAgentFromTrace !== 'function') {
+          throw new Error(`"resumeAgentFromTrace" is not an exported function in ${agentsModulePath}`)
+        }
+        currentOutput = await (agentsMod.resumeAgentFromTrace as (s: AgentState) => Promise<unknown>)(agentState)
+        console.error('[worker] resumeAgentFromTrace resolved, currentOutput:', currentOutput)
+      } else {
+        // Standard workflow path
+        const workflowsMod = await import(pathToFileURL(workflowsModulePath).href)
+        const workflowFn = workflowsMod[workflowName]
+        if (typeof workflowFn !== 'function') {
+          ;(process as NodeJS.Process).exit = originalExit
+          await writeResult({ ok: false, error: `"${workflowName}" is not an exported function in the workflow module.` })
+          originalExit(1)
+          return
+        }
+        // Standardize workflow argument resolution: always pass [input] if args is empty
+        const callArgs = args.length ? args : [input]
+        currentOutput = await (workflowFn as (...a: unknown[]) => unknown)(...callArgs)
+        console.error('[worker] workflowFn resolved, currentOutput:', currentOutput)  // stderr so it's visible
+      }
     } finally {
       uninstallAIInterceptor()
       restoreFetch()
