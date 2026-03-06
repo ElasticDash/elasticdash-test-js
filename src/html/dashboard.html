@@ -77,6 +77,9 @@
             .resume-agent-btn:disabled { opacity: 0.6; cursor: default; }
             .agent-task-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #f0e8ff; color: #6a2fb0; border: 1px solid #d4b8f0; margin-left: 6px; font-weight: 600; }
             .agent-task-row { background: #f7f0ff; border-left: 3px solid #8560c6; }
+            .frozen-row { background: #eef7ff; border-left: 3px solid #8cbcf5; }
+            .observation-table tbody tr.selected.frozen-row { background: #dcebff; }
+            .frozen-tag { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #dcecff; color: #1f5fbf; border: 1px solid #a9c8f3; margin-left: 6px; font-weight: 600; }
             .detail-sections { display: flex; flex-direction: column; gap: 12px; height: 486.5px; overflow-y: auto; }
             .detail-section { background: white; border: 1px solid #eee; border-radius: 6px; padding: 10px; }
             .detail-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: #555; text-transform: uppercase; letter-spacing: 0.02em; }
@@ -577,8 +580,13 @@
                                 const type = action.type || "UNKNOWN";
                                 const typeClass = type === "TOOL" ? "tool" : "ai";
                                 const agentBadge = action.agentTaskIndex != null ? `<span class="agent-task-badge">T${action.agentTaskIndex + 1}</span>` : '';
-                                const rowClass = action.agentTaskIndex != null ? 'agent-task-row' : '';
-                                return `<tr class="${isSelected ? "selected" : ""} ${rowClass}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}${agentBadge}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
+                                const frozenBadge = action.isFrozen ? '<span class="frozen-tag">Frozen</span>' : '';
+                                const rowClasses = [
+                                    isSelected ? 'selected' : '',
+                                    action.agentTaskIndex != null ? 'agent-task-row' : '',
+                                    action.isFrozen ? 'frozen-row' : '',
+                                ].filter(Boolean).join(' ');
+                                return `<tr class="${rowClasses}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}${agentBadge}${frozenBadge}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
                             }).join("");
                             observationsTable += `</tbody></table></div>`;
                             // Details for selected observation

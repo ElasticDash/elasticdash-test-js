@@ -63,6 +63,7 @@ interface DashboardObservation {
   name?: string
   input?: unknown
   output?: unknown
+  isFrozen?: boolean
   model?: string
   provider?: string
   modelParameters?: {
@@ -663,6 +664,7 @@ function buildValidationObservations(
   workflowError: string | undefined,
   trace: ReturnType<typeof startTraceSession>['context']['trace'],
   workflowTrace?: WorkflowTrace,
+  frozenEventIds?: Set<number>,
 ): DashboardObservation[] {
   const steps = trace.getSteps()
   const workflowStartTime = steps.length > 0 ? steps[0].timestamp : Date.now()
@@ -686,6 +688,12 @@ function buildValidationObservations(
     if (hasAiEvents && step.type === 'llm') continue
     if (hasToolEvents && step.type === 'tool') continue
     const obs = toObservationFromStep({ type: step.type, data: step.data, timestamp: step.timestamp })
+    
+    // Mark frozen if this step's workflowEventId is in the frozen set
+    if (obs.workflowEventId !== undefined && frozenEventIds?.has(obs.workflowEventId)) {
+      obs.isFrozen = true
+    }
+    
     observations.push(obs)
 
     // Track the index of the first GENERATION observation
@@ -699,6 +707,9 @@ function buildValidationObservations(
     for (const event of workflowTrace.events) {
       if (event.type === 'ai' || event.type === 'tool' || event.type === 'http' || event.type === 'db') {
         const obs = toObservationFromWorkflowEvent(event)
+        if (frozenEventIds?.has(event.id)) {
+          obs.isFrozen = true
+        }
         observations.push(obs)
         if (firstGenerationIndex === -1 && obs.type === 'GENERATION') {
           firstGenerationIndex = observations.length - 1
@@ -1251,6 +1262,15 @@ export async function startDashboardServer(
 
           const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools') ?? null
 
+          const frozenEventIds = new Set(
+            history
+              .filter((event) => (
+                event.id <= checkpoint
+                && (event.type === 'ai' || event.type === 'tool' || event.type === 'http' || event.type === 'db')
+              ))
+              .map((event) => event.id),
+          )
+
           console.log(`[elasticdash] Run from breakpoint: workflow="${workflowName}" checkpoint=${checkpoint} historyLen=${history.length}`)
           const result = await runWorkflowInSubprocess(
             workflowsModulePath,
@@ -1276,7 +1296,7 @@ export async function startDashboardServer(
             runNumber: 0,
             ok: result.ok,
             error: result.ok ? undefined : result.error,
-            observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, result.ok ? undefined : result.error, traceStub, result.workflowTrace),
+            observations: buildValidationObservations(workflowName, workflowInput, result.currentOutput, result.ok ? undefined : result.error, traceStub, result.workflowTrace, frozenEventIds),
             workflowTrace: result.workflowTrace,
             currentOutput: result.currentOutput,
             snapshotId,

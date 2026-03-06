@@ -285,6 +285,81 @@ aiTest('user lookup flow', async (ctx) => {
 
 **Libraries using `https.request` directly** (older versions of some SDKs) are not covered by fetch interception. Use manual `ctx.trace.recordLLMStep()` for those.
 
+## Automatic Tool Recording
+
+Tool functions are automatically wrapped and recorded when imported and called during workflow execution. This gives you tracing and replay support without any manual instrumentation.
+
+### How to use tools
+
+Define your tools in `ed_tools.ts` and export them:
+
+```ts
+// ed_tools.ts
+export const chargeCard = async (input: { amount: number; cardToken: string }) => {
+  // your actual implementation
+  return { success: true, transactionId: 'txn-123' }
+}
+
+export const fetchOrderStatus = async (input: { orderId: string }) => {
+  // query your database or API
+  return { status: 'shipped', tracking: 'track-456' }
+}
+```
+
+In your workflows or agents, simply import and call them — the runner automatically wraps them and records each call:
+
+```ts
+import { chargeCard, fetchOrderStatus } from './ed_tools'
+
+export async function checkoutFlow(orderId: string, cardToken: string) {
+  const order = await fetchOrderStatus({ orderId })
+  const charge = await chargeCard({ amount: order.total, cardToken })
+  return { orderId, chargeId: charge.transactionId }
+}
+```
+
+Each call to a tool is automatically recorded to `ctx.trace` with:
+- Tool name
+- Input arguments
+- Output result
+- Timestamp and duration
+
+No `ctx.trace.recordToolCall()` needed — it happens behind the scenes.
+
+### Tool replay and freezing in "Run from here"
+
+When you use the dashboard's "Run from here" feature to replay a workflow from a checkpoint:
+
+1. **Tools called before the checkpoint** are **frozen** — their recorded results are returned instantly without re-executing the actual function.
+2. **Tools called after the checkpoint** execute normally with live dependencies.
+
+This means:
+- If a tool made 3 API calls before the checkpoint, those calls won't happen again on replay.
+- If the tool is slow (waiting for external services), frozen calls are instant.
+- The tool's frozen status is visible in the dashboard with a frozen tag/styling, matching AI step behavior.
+
+Example:
+```
+Task 1: fetchOrderStatus()          ↓ frozen (checkpoint before this)
+  │─ API call to orders service      ↓ frozen
+  └─ Result: { status: shipped }     ↓ frozen
+
+→ You modify input for Task 2 and re-run
+  The fetchOrderStatus API call is skipped; the original result is reused instantly.
+```
+
+### Recording tool calls manually
+
+If you need to record tools outside the normal import flow or for providers not in `ed_tools.ts`, use:
+
+```ts
+ctx.trace.recordToolCall({
+  name: 'customTool',
+  args: { param: 'value' },
+  result: { success: true }
+})
+```
+
 ### Recording flow steps without passing `ctx.trace` (AsyncLocalStorage)
 
 The runner now sets a per-test `currentTrace` using Node’s `AsyncLocalStorage`, so your app code can record steps without threading `ctx.trace` through every function. This remains safe under parallel execution.
