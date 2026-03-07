@@ -19,8 +19,8 @@ export function interceptRandom(): void {
     const { recorder, replay } = ctx
     const n = recorder.nextSideEffectId()
 
-    if (replay.shouldReplaySideEffect(n)) {
-      return replay.getSideEffectResult(n) as number
+    if (replay.shouldReplaySideEffectOfType(n, 'Math.random')) {
+      return replay.getSideEffectResultOfType(n, 'Math.random') as number
     }
 
     const value = originalRandom!()
@@ -56,8 +56,8 @@ export function interceptDateNow(): void {
     const { recorder, replay } = ctx
     const n = recorder.nextSideEffectId()
 
-    if (replay.shouldReplaySideEffect(n)) {
-      return replay.getSideEffectResult(n) as number
+    if (replay.shouldReplaySideEffectOfType(n, 'Date.now')) {
+      return replay.getSideEffectResultOfType(n, 'Date.now') as number
     }
 
     const value = originalDateNow!()

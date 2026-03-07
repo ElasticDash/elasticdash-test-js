@@ -10,21 +10,52 @@
  * @param result - The tool result (or error)
  */
 import { getCurrentTrace } from './trace-adapter/context.js'
+import { getCaptureContext } from './capture/recorder.js'
+import { rawDateNow } from './interceptors/side-effects.js'
+
+const TOOL_WRAPPER_ACTIVE_KEY = '__elasticdash_tool_wrapper_active__'
+
+function wrapperRecordingActive(): boolean {
+  return (globalThis as Record<string, unknown>)[TOOL_WRAPPER_ACTIVE_KEY] === true
+}
 
 export function recordToolCall(name: string, args: any, result: any) {
-  // Use AsyncLocalStorage-backed runner context (parallel-safe)
-  const trace = getCurrentTrace()
-  if (trace && typeof trace.recordToolCall === 'function') {
-    try {
+  try {
+    // Avoid double-recording when a replay-aware tool wrapper is already active.
+    if (wrapperRecordingActive()) return
+
+    const trace = getCurrentTrace()
+    if (!trace || typeof trace.recordToolCall !== 'function') return
+
+    const ctx = getCaptureContext()
+    if (!ctx) {
       trace.recordToolCall({ name, args, result })
-      console.log(`[ElasticDash] recordToolCall: ${name} with args ${JSON.stringify(args)} and result ${JSON.stringify(result)}`)
-    } catch (e) {
-      trace.recordToolCall({ name, args, result: e })
-      console.error('Error recording tool call:', e)
-      // Never throw, always swallow errors
+      return
     }
-  } else {
-    console.log(`[ElasticDash] recordToolCall called outside of ElasticDash runner. Tool: ${name}, args: ${JSON.stringify(args)}, result: ${JSON.stringify(result)}`)
+
+    const { recorder, replay } = ctx
+    const id = recorder.nextId()
+
+    if (replay.shouldReplay(id)) {
+      const historical = replay.getRecordedEvent(id)
+      if (historical) recorder.record(historical)
+      const replayed = replay.getRecordedResult(id)
+      trace.recordToolCall({ name, args, result: replayed, workflowEventId: id })
+      return
+    }
+
+    const output = result instanceof Error ? { error: String(result) } : result
+    recorder.record({
+      id,
+      type: 'tool',
+      name,
+      input: args,
+      output,
+      timestamp: rawDateNow(),
+      durationMs: 0,
+    })
+    trace.recordToolCall({ name, args, result: output, workflowEventId: id })
+  } catch {
+    // Never throw, always swallow errors
   }
-  // No-op if not running in ElasticDash
 }

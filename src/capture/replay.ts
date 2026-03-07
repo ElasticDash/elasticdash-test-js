@@ -36,4 +36,20 @@ export class ReplayController {
   getSideEffectResult(n: number): unknown {
     return this.sideEffectMap.get(n)?.output
   }
+
+  getRecordedSideEffectEvent(n: number): WorkflowEvent | undefined {
+    return this.sideEffectMap.get(n)
+  }
+
+  shouldReplaySideEffectOfType(n: number, expectedName: string): boolean {
+    if (!this.replayMode) return false
+    const event = this.sideEffectMap.get(n)
+    return !!event && event.type === 'side_effect' && event.name === expectedName
+  }
+
+  getSideEffectResultOfType(n: number, expectedName: string): unknown {
+    const event = this.sideEffectMap.get(n)
+    if (!event || event.type !== 'side_effect' || event.name !== expectedName) return undefined
+    return event.output
+  }
 }

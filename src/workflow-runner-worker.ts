@@ -26,6 +26,8 @@ import type { WorkflowEvent } from './capture/event.js'
 import type { AgentState } from './types/agent.js'
 import fs from 'node:fs'
 
+const TOOL_WRAPPER_ACTIVE_KEY = '__elasticdash_tool_wrapper_active__'
+
 async function readStdin(): Promise<string> {
   let raw = ''
   for await (const chunk of process.stdin) {
@@ -78,18 +80,37 @@ async function loadAndWrapTools(
             return replayed
           }
 
-          const result = Reflect.apply(target, thisArg, args)
+          const g = globalThis as Record<string, unknown>
+          const prev = g[TOOL_WRAPPER_ACTIVE_KEY]
+          const restoreWrapperFlag = () => {
+            if (prev === undefined) delete g[TOOL_WRAPPER_ACTIVE_KEY]
+            else g[TOOL_WRAPPER_ACTIVE_KEY] = prev
+          }
+
+          g[TOOL_WRAPPER_ACTIVE_KEY] = true
+
+          let result: unknown
+          try {
+            result = Reflect.apply(target, thisArg, args)
+          } catch (e) {
+            restoreWrapperFlag()
+            throw e
+          }
+
           if (result && typeof (result as Promise<unknown>).then === 'function') {
             return (result as Promise<unknown>).then((v: unknown) => {
+              restoreWrapperFlag()
               if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: v, timestamp: start, durationMs: rawDateNow() - start })
               trace.recordToolCall({ name, args: recordedArgs, result: v, workflowEventId: id })
               return v
             }).catch((e: unknown) => {
+              restoreWrapperFlag()
               if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: { error: String(e) }, timestamp: start, durationMs: rawDateNow() - start })
               trace.recordToolCall({ name, args: recordedArgs, result: { error: String(e) }, workflowEventId: id })
               throw e
             })
           }
+          restoreWrapperFlag()
           if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: result, timestamp: start, durationMs: rawDateNow() - start })
           trace.recordToolCall({ name, args: recordedArgs, result, workflowEventId: id })
           return result

@@ -295,15 +295,17 @@ Define your tools in `ed_tools.ts` and export them:
 
 ```ts
 // ed_tools.ts
-export const chargeCard = async (input: { amount: number; cardToken: string }) => {
+import { wrapTool } from 'elasticdash-test'
+
+export const chargeCard = wrapTool('chargeCard', async (input: { amount: number; cardToken: string }) => {
   // your actual implementation
   return { success: true, transactionId: 'txn-123' }
-}
+})
 
-export const fetchOrderStatus = async (input: { orderId: string }) => {
+export const fetchOrderStatus = wrapTool('fetchOrderStatus', async (input: { orderId: string }) => {
   // query your database or API
   return { status: 'shipped', tracking: 'track-456' }
-}
+})
 ```
 
 In your workflows or agents, simply import and call them — the runner automatically wraps them and records each call:
@@ -326,6 +328,11 @@ Each call to a tool is automatically recorded to `ctx.trace` with:
 
 No `ctx.trace.recordToolCall()` needed — it happens behind the scenes.
 
+Runtime behavior by mode:
+- Local/normal execution: wrapped tools run normally (no replay context).
+- Trace capture mode: wrapped tools run normally and are recorded.
+- Replay mode (`Run from here`): pre-checkpoint wrapped calls return historical results and skip tool body execution.
+
 ### Tool replay and freezing in "Run from here"
 
 When you use the dashboard's "Run from here" feature to replay a workflow from a checkpoint:
@@ -337,6 +344,7 @@ This means:
 - If a tool made 3 API calls before the checkpoint, those calls won't happen again on replay.
 - If the tool is slow (waiting for external services), frozen calls are instant.
 - The tool's frozen status is visible in the dashboard with a frozen tag/styling, matching AI step behavior.
+- Side-effect replay is type-checked (`Date.now` vs `Math.random`) and malformed observation timestamps are auto-sanitized.
 
 Example:
 ```
@@ -357,6 +365,16 @@ ctx.trace.recordToolCall({
   name: 'customTool',
   args: { param: 'value' },
   result: { success: true }
+})
+```
+
+Manual recording is best-effort trace logging. For full replay/freeze semantics in "Run from here" (including frozen tool tags and deterministic replay), run tools through the replay-aware wrapper path (auto-wrapped worker tools or `wrapTool(...)`).
+
+```ts
+import { wrapTool } from 'elasticdash-test'
+
+export const customTool = wrapTool('customTool', async (input: { param: string }) => {
+  return await doWork(input)
 })
 ```
 
@@ -511,7 +529,12 @@ Re-export tool functions that agents or workflows can invoke:
 
 ```ts
 // ed_tools.ts
-export { chargeCard, fetchOrderStatus, sendNotification } from './src/tools'
+import { wrapTool } from 'elasticdash-test'
+import { chargeCard as chargeCardRaw, fetchOrderStatus as fetchOrderStatusRaw, sendNotification as sendNotificationRaw } from './src/tools'
+
+export const chargeCard = wrapTool('chargeCard', chargeCardRaw)
+export const fetchOrderStatus = wrapTool('fetchOrderStatus', fetchOrderStatusRaw)
+export const sendNotification = wrapTool('sendNotification', sendNotificationRaw)
 ```
 
 #### `ed_agents.ts`

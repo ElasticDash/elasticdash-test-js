@@ -508,6 +508,13 @@ function resolveWorkflowArgsFromObservations(body: WorkflowValidationBody, workf
   return { args: normalizeWorkflowArgs(matched.input), input: matched.input }
 }
 
+function normalizeStartTime(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 1) {
+    return value
+  }
+  return Date.now()
+}
+
 function toObservationFromStep(step: { type: string; data: Record<string, unknown>; timestamp?: number }): DashboardObservation {
   if (step.type === 'llm') {
     return {
@@ -517,7 +524,7 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
       model: typeof step.data.model === 'string' ? step.data.model : undefined,
       input: step.data.prompt,
       output: step.data.completion,
-      startTime: step.timestamp,
+      startTime: normalizeStartTime(step.timestamp),
       workflowEventId: typeof step.data.workflowEventId === 'number' ? step.data.workflowEventId : undefined,
     }
   }
@@ -528,7 +535,7 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
       name: typeof step.data.name === 'string' ? step.data.name : 'tool',
       input: step.data.args,
       output: step.data.result,
-      startTime: step.timestamp,
+      startTime: normalizeStartTime(step.timestamp),
       workflowEventId: typeof step.data.workflowEventId === 'number' ? step.data.workflowEventId : undefined,
     }
   }
@@ -538,7 +545,7 @@ function toObservationFromStep(step: { type: string; data: Record<string, unknow
     name: typeof step.data.name === 'string' ? step.data.name : typeof step.data.kind === 'string' ? step.data.kind : 'custom',
     input: step.data.payload ?? step.data.metadata,
     output: step.data.result,
-    startTime: step.timestamp,
+    startTime: normalizeStartTime(step.timestamp),
   }
 }
 
@@ -605,7 +612,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
       model: inp?.model ?? event.name,
       input: inp?.prompt,
       output: completion,
-      startTime: event.timestamp,
+      startTime: normalizeStartTime(event.timestamp),
       workflowEventId: event.id,
       ...agentFields,
     }
@@ -617,7 +624,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
       name: event.name,
       input: event.input,
       output: event.output,
-      startTime: event.timestamp,
+      startTime: normalizeStartTime(event.timestamp),
       workflowEventId: event.id,
       ...agentFields,
     }
@@ -630,7 +637,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
       name: inp?.url ?? 'http',
       input: event.input,
       output: event.output,
-      startTime: event.timestamp,
+      startTime: normalizeStartTime(event.timestamp),
       workflowEventId: event.id,
       ...agentFields,
     }
@@ -641,7 +648,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
       name: event.name,
       input: event.input,
       output: event.output,
-      startTime: event.timestamp,
+      startTime: normalizeStartTime(event.timestamp),
       workflowEventId: event.id,
       ...agentFields,
     }
@@ -651,7 +658,7 @@ function toObservationFromWorkflowEvent(event: WorkflowEvent): DashboardObservat
     name: event.name,
     input: event.input,
     output: event.output,
-    startTime: event.timestamp,
+    startTime: normalizeStartTime(event.timestamp),
     workflowEventId: event.id,
     ...agentFields,
   }
