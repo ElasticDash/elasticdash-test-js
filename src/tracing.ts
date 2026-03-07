@@ -19,6 +19,7 @@ export function recordToolCall(name: string, args: any, result: any) {
       trace.recordToolCall({ name, args, result })
       console.log(`[ElasticDash] recordToolCall: ${name} with args ${JSON.stringify(args)} and result ${JSON.stringify(result)}`)
     } catch (e) {
+      trace.recordToolCall({ name, args, result: e })
       console.error('Error recording tool call:', e)
       // Never throw, always swallow errors
     }
