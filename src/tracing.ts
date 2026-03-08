@@ -20,6 +20,7 @@ function wrapperRecordingActive(): boolean {
 }
 
 export function recordToolCall(name: string, args: any, result: any) {
+  if (!(globalThis as any).__ELASTICDASH_WORKER__) return
   try {
     // Avoid double-recording when a replay-aware tool wrapper is already active.
     if (wrapperRecordingActive()) return

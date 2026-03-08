@@ -1185,6 +1185,9 @@ export async function startDashboardServer(
     if (url.pathname === '/api/workflows') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ workflows }))
+    } else if (url.pathname === '/api/repo-root') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ repoRoot: cwd }))
     } else if (url.pathname === '/api/code-index') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(codeIndex))

@@ -164,6 +164,7 @@
             let rerunInFlight = new Set();
             let step4SelectedRun = -1;
             let step5RunTraces = [];
+            let repoRoot = ''; // Will be fetched from API
             try {
                 const _saved = localStorage.getItem('ed_step5RunTraces');
                 if (_saved) step5RunTraces = JSON.parse(_saved);
@@ -1138,11 +1139,43 @@
                 } catch { /* ignore network errors */ }
             }
 
+            function stripAbsolutePath(filePath) {
+                console.log('stripAbsolutePath called with:', filePath, 'repoRoot:', repoRoot);
+                if (!filePath) return filePath;
+                
+                // If we have a repo root, strip it from the absolute path
+                if (repoRoot) {
+                    // Normalize path separators and handle case-insensitive filesystems
+                    let normalizedRoot = repoRoot.replace(/\\/g, '/').toLowerCase();
+                    let normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+                    
+                    // Ensure root ends with / for proper matching
+                    if (!normalizedRoot.endsWith('/')) {
+                        normalizedRoot += '/';
+                    }
+                    
+                    if (normalizedPath.startsWith(normalizedRoot)) {
+                        // Return the original case of the file path after the root
+                        return filePath.replace(/\\/g, '/').substring(repoRoot.length).replace(/^\//, '');
+                    }
+                    
+                    // Also try without trailing slash
+                    normalizedRoot = normalizedRoot.slice(0, -1);
+                    if (normalizedPath.startsWith(normalizedRoot + '/')) {
+                        return filePath.replace(/\\/g, '/').substring(repoRoot.length).replace(/^\//, '');
+                    }
+                }
+                
+                // Fallback if repo root not available or path doesn't match
+                return filePath;
+            }
+
             function renderFilePath(filePath) {
                 if (!filePath) return '';
+                const cleanPath = stripAbsolutePath(filePath);
                 return `<div class="detail-section">
                 <div class="detail-title">File Path</div>
-                <pre class="detail-pre">${esc(filePath)}</pre>
+                <pre class="detail-pre">${esc(cleanPath)}</pre>
                 </div>`;
             }
 
@@ -1263,13 +1296,20 @@
                 }
             }
             
-            fetch("/api/workflows").then(r => r.json()).then(d => {
+            fetch("/api/repo-root").then(r => r.json()).then(d => {
+                console.log("[Dashboard] Repo root fetched:", d);
+                repoRoot = d.repoRoot || '';
+                console.log("[Dashboard] repoRoot set to:", repoRoot);
+                
+                // Now fetch workflows after repo root is loaded
+                return fetch("/api/workflows");
+            }).then(r => r.json()).then(d => {
                 console.log("[Dashboard] Workflows fetched:", d);
                 allWorkflows = d.workflows || [];
                 console.log("[Dashboard] Calling render with", allWorkflows.length, "workflows");
                 render();
             }).catch(err => {
-                console.error("Failed to fetch workflows:", err);
+                console.error("Failed to fetch repo root or workflows:", err);
                 tbody.innerHTML = '<tr><td colspan="2" style="text-align: center; padding: 40px; color: #c62828;">Error loading workflows</td></tr>';
             });
             
@@ -1290,7 +1330,7 @@
                 console.log("[Dashboard] Rendering", filtered.length, "workflows");
                 tbody.innerHTML = filtered.length ? filtered.map((w, i) => `<tr onclick="showModal(${i},'${search}')">
                     <td><div class="workflow-name-cell">${esc(w.name)}${w.isAsync ? '<span class="async-badge">async</span>' : ""}</div></td>
-                    <td><div class="workflow-path-cell">${esc(w.filePath)}</div></td>
+                    <td><div class="workflow-path-cell">${esc(stripAbsolutePath(w.filePath))}</div></td>
                 </tr>`).join("") : `<tr><td colspan="2" style="text-align: center; padding: 40px; color: #999;">No workflows found</td></tr>`;
                 console.log("[Dashboard] tbody updated");
             }

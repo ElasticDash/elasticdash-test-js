@@ -1,3 +1,6 @@
+// Mark this process as an Elasticdash worker before anything else runs
+;(globalThis as any).__ELASTICDASH_WORKER__ = true
+
 /**
  * tool-runner-worker.ts
  *

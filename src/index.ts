@@ -8,6 +8,7 @@ export { reportResults } from './reporter.js'
 export { installAIInterceptor, uninstallAIInterceptor } from './interceptors/ai-interceptor.js'
 export { startLLMProxy, fetchCapturedTrace } from './proxy/llm-capture.js'
 export { recordToolCall } from './tracing.js'
+export { safeRecordToolCall, isWorker } from './internals/conditional-recorder.js'
 export type { TestResult, FileResult, RunnerOptions } from './runner.js'
 export type { AITestContext, TraceHandle, LLMStep, ToolCall, CustomStep, TraceStep, RunnerHooks } from './trace-adapter/context.js'
 // Workflow capture & replay

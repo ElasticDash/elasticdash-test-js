@@ -1,3 +1,6 @@
+// Mark this process as an Elasticdash worker before anything else runs
+;(globalThis as any).__ELASTICDASH_WORKER__ = true
+
 // Ensure .env is loaded in the worker subprocess
 import 'dotenv/config'
 /**

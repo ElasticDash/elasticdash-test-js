@@ -1,6 +1,6 @@
 {
   "name": "elasticdash-test",
-  "version": "0.1.11-alpha-1",
+  "version": "0.1.11-alpha-4",
   "description": "AI-native test runner for ElasticDash workflow testing",
   "type": "module",
   "bin": {
