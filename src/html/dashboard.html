@@ -414,29 +414,68 @@
 
             uploadArea.onclick = () => fileInput.click();
             
+            // Drag and drop handlers
+            uploadArea.ondragover = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                uploadArea.style.borderColor = '#0066cc';
+                uploadArea.style.background = '#f0f7ff';
+            };
+            
+            uploadArea.ondragleave = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                uploadArea.style.borderColor = '#ddd';
+                uploadArea.style.background = '#fafafa';
+            };
+            
+            uploadArea.ondrop = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                uploadArea.style.borderColor = '#ddd';
+                uploadArea.style.background = '#fafafa';
+                
+                const files = e.dataTransfer.files;
+                if (files.length === 0) return;
+                
+                const file = files[0];
+                // Check if it's a JSON file
+                if (!file.name.toLowerCase().endsWith('.json')) {
+                    uploadStatus.className = "upload-status error";
+                    uploadStatus.textContent = "Please drop a JSON file";
+                    return;
+                }
+                
+                handleFileUpload(file);
+            };
+            
             fileInput.onchange = (e) => {
                 if (!e.target.files[0]) return;
                 const file = e.target.files[0];
                 // Always clear file input so same file can be uploaded again
                 fileInput.value = "";
+                handleFileUpload(file);
+            };
+            
+            function handleFileUpload(file) {
                 // Clear observations before loading new trace
                 resetTraceModal();
                 const reader = new FileReader();
                 reader.onload = (e) => {
-                try {
-                    const data = JSON.parse(e.target.result);
-                    uploadStatus.className = "upload-status";
-                    uploadStatus.textContent = "";
-                    displayTrace(data);
-                } catch (err) {
-                    uploadArea.classList.remove("hidden");
-                    traceViewer.classList.remove("visible");
-                    uploadStatus.className = "upload-status error";
-                    uploadStatus.textContent = "Invalid JSON";
-                }
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        uploadStatus.className = "upload-status";
+                        uploadStatus.textContent = "";
+                        displayTrace(data);
+                    } catch (err) {
+                        uploadArea.classList.remove("hidden");
+                        traceViewer.classList.remove("visible");
+                        uploadStatus.className = "upload-status error";
+                        uploadStatus.textContent = "Invalid JSON";
+                    }
                 };
                 reader.readAsText(file);
-            };
+            }
             
             function displayTrace(data) {
                 let obs = [];
