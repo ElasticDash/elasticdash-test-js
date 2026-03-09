@@ -461,7 +461,7 @@ async function rerunObservation(cwd: string, observation: DashboardObservation, 
 }
 
 function resolveWorkflowModule(cwd: string): string | null {
-  return resolveRuntimeModule(cwd, 'ed_workflows') ?? resolveRuntimeModule(cwd, 'ed_workflow')
+  return resolveRuntimeModule(cwd, 'ed_workflows')
 }
 
 function normalizeRunCount(value: unknown): number {
@@ -766,7 +766,7 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
       mode,
       runCount,
       traces: [],
-      error: 'Cannot find ed_workflows.ts/js (or ed_workflow.ts/js) in workspace root.',
+      error: 'Cannot find ed_workflows.ts/js in workspace root.',
     }
   }
 
@@ -1256,7 +1256,7 @@ export async function startDashboardServer(
           const workflowsModulePath = resolveWorkflowModule(cwd)
           if (!workflowsModulePath) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ ok: false, error: 'Cannot find ed_workflows.ts/js (or ed_workflow.ts/js) in workspace root.' }))
+            res.end(JSON.stringify({ ok: false, error: 'Cannot find ed_workflows.ts/js in workspace root.' }))
             return
           }
 
