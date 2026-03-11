@@ -86,6 +86,33 @@ export const checkoutWorkflow = async (orderId: string) => {
 - Dashboard trace replay requires tools to be called through `ed_tools.ts`
 - LLM agents calling tools will record the call with the `name` from `ed_tools.ts`, so using the same import ensures name matching
 
+## Tool Function Compatibility (`ed_tools.ts/js`)
+
+Exports in `ed_tools.ts/js` should be plain callable functions that take serializable input and return serializable output.
+
+- Export directly callable functions
+- Use JSON-serializable args/results (object, array, string, number, boolean, or `null`)
+- Avoid exporting framework request/response handlers directly (for example Next.js `NextRequest`/`NextResponse` route handlers)
+
+Compatible export example:
+
+```ts
+export async function chargeCard(input: { amount: number; token: string }) {
+  return { success: true, transactionId: 'txn-123' }
+}
+```
+
+Not directly compatible as a tool export:
+
+```ts
+// Next.js route handler style
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  return NextResponse.json({ ok: true })
+}
+```
+
+If your app uses framework handlers, keep `ed_tools.ts/js` as a plain callable boundary and invoke your framework-specific code behind that boundary.
+
 ## Recording Without Passing `ctx.trace`
 
 Use Node's `AsyncLocalStorage` to record steps without threading `ctx.trace` through every function:

@@ -7,8 +7,10 @@ Get ElasticDash running in 10 minutes and start debugging your workflows.
 - [Quick Start Guide](#quick-start-guide)
   - [Table of Contents](#table-of-contents)
   - [Step 1: Install the SDK](#step-1-install-the-sdk)
+    - [Add `.temp` to `.gitignore`](#add-temp-to-gitignore)
   - [Step 2: Configure Environment Variables](#step-2-configure-environment-variables)
   - [Step 3: Create `ed_workflows.ts` (or `ed_workflows.js`)](#step-3-create-ed_workflowsts-or-ed_workflowsjs)
+    - [What Can Be Exported in `ed_workflows.ts/js`](#what-can-be-exported-in-ed_workflowstsjs)
   - [Step 4: Create `ed_tools.ts` (or `ed_tools.js`)](#step-4-create-ed_toolsts-or-ed_toolsjs)
   - [Step 5: Update Workflow Tool Calls](#step-5-update-workflow-tool-calls)
   - [Step 6: Add Dashboard Shortcut to `package.json`](#step-6-add-dashboard-shortcut-to-packagejson)
@@ -27,6 +29,14 @@ Get ElasticDash running in 10 minutes and start debugging your workflows.
 
 ```bash
 npm install elasticdash-test
+```
+
+### Add `.temp` to `.gitignore`
+
+ElasticDash writes runtime artifacts (for example, dashboard snapshots) under `.temp/`. Add it to `.gitignore` so temporary files are not committed.
+
+```gitignore
+.temp/
 ```
 
 ## Step 2: Configure Environment Variables
@@ -59,6 +69,33 @@ Export all workflow functions you want to debug:
 export { checkoutFlow, refundFlow } from './src/workflows'
 export { processOrderFlow } from './src/flows/orders'
 ```
+
+### What Can Be Exported in `ed_workflows.ts/js`
+
+Your exported workflow must be a directly callable function with JSON-serializable input/output.
+
+Valid shape examples:
+
+```ts
+export async function checkoutFlow(input: { orderId: string }) {
+  return { ok: true, orderId: input.orderId }
+}
+
+export async function batchFlow(input: Array<{ id: string }>) {
+  return input.map((item) => ({ id: item.id, processed: true }))
+}
+```
+
+Not compatible as direct workflow exports:
+
+```ts
+// Next.js route handler style (not directly callable by dashboard workflow runner)
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  return NextResponse.json({ ok: true })
+}
+```
+
+If you are using Next.js route handlers, export a separate plain function for workflow replay and call that function from your route handler.
 
 ## Step 4: Create `ed_tools.ts` (or `ed_tools.js`)
 

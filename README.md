@@ -38,6 +38,12 @@ npm install elasticdash-test
 
 **Requirements:** Node 20+. For Deno projects, see [Using elasticdash-test in Deno](docs/deno.md).
 
+**Git ignore:** ElasticDash writes temporary runtime artifacts under `.temp/`. Add this to your `.gitignore`:
+
+```gitignore
+.temp/
+```
+
 **Running CLI commands:** Use `npx` to run commands with your locally installed version (recommended to avoid version drift):
 
 ```bash
@@ -91,6 +97,12 @@ npx elasticdash run my-flow.ai.test.ts  # run a single file
 Total: 3
 Duration: 3.4s
 ```
+
+**Workflow export requirements:**
+
+- Export plain callable functions from `ed_workflows.ts/js`.
+- Use JSON-serializable inputs/outputs (object or array) so dashboard replay can pass args and read results.
+- Do not export framework-bound handlers directly (for example Next.js `NextRequest`/`NextResponse` route handlers).
 
 ---
 

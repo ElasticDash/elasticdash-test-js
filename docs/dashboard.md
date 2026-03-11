@@ -274,6 +274,25 @@ export { orderWorkflow, refundWorkflow } from './src/workflows'
 export { userLookupFlow } from './src/user-flows'
 ```
 
+**Important: Workflow Function Compatibility**
+
+Dashboard replay executes exported workflow functions directly in a subprocess. Exported functions in `ed_workflows.ts/js` should:
+
+- Be directly callable functions (not framework request handlers)
+- Accept JSON-serializable input (object or array)
+- Return JSON-serializable output (object or array)
+
+Not directly compatible as workflow exports:
+
+```ts
+// Next.js route handler style
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  return NextResponse.json({ ok: true })
+}
+```
+
+If your app uses framework handlers, create a plain workflow function and call it from the handler.
+
 ### `ed_tools.ts`
 
 Re-export tool functions that agents or workflows can invoke:
@@ -305,6 +324,25 @@ export const dataService = async (input: any) => {
     })
 }
 ```
+
+**Important: Tool Function Compatibility**
+
+Dashboard tool reruns execute exported tool functions directly in a subprocess. Exported functions in `ed_tools.ts/js` should:
+
+- Be directly callable functions (not framework request handlers)
+- Accept JSON-serializable input (object or array)
+- Return JSON-serializable output (object, array, or primitive)
+
+Not directly compatible as tool exports:
+
+```ts
+// Next.js route handler style
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  return NextResponse.json({ ok: true })
+}
+```
+
+If your app uses framework handlers, create a plain tool function and call it from the handler.
 
 #### Important: Tool Name and Input Matching
 
