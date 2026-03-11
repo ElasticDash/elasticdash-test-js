@@ -48,6 +48,17 @@ async function discoverTestFiles(patterns: string[], cwd: string): Promise<strin
   return files.sort()
 }
 
+// --- Validate repository directory ---
+function validateRepoDirectory(cwd: string): boolean {
+  const validFiles = [
+    'elasticdash.config.ts',
+    'elasticdash.config.js',
+    'ed_workflows.ts',
+    'ed_workflows.js',
+  ]
+  return validFiles.some(file => existsSync(path.join(cwd, file)))
+}
+
 // --- Bootstrap ---
 async function bootstrap(): Promise<void> {
 
@@ -55,6 +66,16 @@ async function bootstrap(): Promise<void> {
   installAIInterceptor()
 
   const cwd = process.cwd()
+
+  // Validate that we're running from the SDK repository
+  if (!validateRepoDirectory(cwd)) {
+    console.error(
+      `[elasticdash] Error: elasticdash command must be run from the elasticdash-test SDK repository directory.\n` +
+      `Current directory: ${cwd}\n` +
+      `Expected: A directory containing one of: elasticdash.config.ts, elasticdash.config.js, ed_workflows.ts, ed_workflows.js`
+    )
+    process.exit(1)
+  }
   const config = await loadConfig(cwd)
   const defaultPattern = config.testMatch ?? ['**/*.ai.test.ts', '**/*.ai.test.js']
 

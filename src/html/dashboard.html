@@ -5,6 +5,12 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>ElasticDash Dashboard</title>
         <style>
+            /* Ensure first cell in observation-table never overflows parent */
+            .observation-table td:first-child {
+                max-width: 120px;
+                overflow: auto;
+                white-space: nowrap;
+            }
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; }
             .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
@@ -63,6 +69,17 @@
             .obs-type { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; background: #e6e6e6; color: #333; }
             .obs-type.tool { background: #e8f7ef; color: #1f7a44; }
             .obs-type.ai { background: #e8f1ff; color: #1f5fbf; }
+            .run-from-bp-btn { font-size: 11px; padding: 2px 8px; border: 1px solid #bbb; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; white-space: nowrap; }
+            .run-from-bp-btn:hover { background: #e0edff; border-color: #5a8fd8; color: #1f5fbf; }
+            .run-from-bp-btn:disabled { opacity: 0.6; cursor: default; }
+            .resume-agent-btn { font-size: 11px; padding: 2px 8px; border: 1px solid #b8a0d8; border-radius: 4px; background: #f3eeff; color: #5a2d9c; cursor: pointer; white-space: nowrap; margin-left: 6px; }
+            .resume-agent-btn:hover { background: #e6d8ff; border-color: #7c52b8; color: #3d1f7a; }
+            .resume-agent-btn:disabled { opacity: 0.6; cursor: default; }
+            .agent-task-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #f0e8ff; color: #6a2fb0; border: 1px solid #d4b8f0; margin-left: 6px; font-weight: 600; }
+            .agent-task-row { background: #f7f0ff; border-left: 3px solid #8560c6; }
+            .frozen-row { background: #eef7ff; border-left: 3px solid #8cbcf5; }
+            .observation-table tbody tr.selected.frozen-row { background: #dcebff; }
+            .frozen-tag { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: #dcecff; color: #1f5fbf; border: 1px solid #a9c8f3; margin-left: 6px; font-weight: 600; }
             .detail-sections { display: flex; flex-direction: column; gap: 12px; height: 486.5px; overflow-y: auto; }
             .detail-section { background: white; border: 1px solid #eee; border-radius: 6px; padding: 10px; }
             .detail-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: #555; text-transform: uppercase; letter-spacing: 0.02em; }
@@ -83,7 +100,6 @@
             .rerun-status.error { color: #c62828; }
             @media (max-width: 900px) {
             .trace-layout { grid-template-columns: 1fr; }
-            .observation-table-wrap { max-height: 260px; }
             }
         </style>
         <script>
@@ -148,7 +164,23 @@
             let rerunInFlight = new Set();
             let step4SelectedRun = -1;
             let step5RunTraces = [];
+            let repoRoot = ''; // Will be fetched from API
+            try {
+                const _saved = localStorage.getItem('ed_step5RunTraces');
+                if (_saved) step5RunTraces = JSON.parse(_saved);
+            } catch {}
             let step5RunMeta = { loading: false, error: '', runCount: 0, sequential: false };
+
+            function persistTraces() {
+                try {
+                    // Store compact version — strip bulky workflowTrace.events (snapshot is on server)
+                    const compact = step5RunTraces.map(function(t) {
+                        const { workflowTrace, ...rest } = t;
+                        return rest;
+                    });
+                    localStorage.setItem('ed_step5RunTraces', JSON.stringify(compact));
+                } catch {}
+            }
             const tbody = document.getElementById("workflowsTableBody");
             const countEl = document.getElementById("resultCount");
             const modal = document.getElementById("traceModal");
@@ -250,9 +282,12 @@
                         <input id="liveValidationSequential" type="checkbox" />
                         Run in sequence instead of parallel
                     </label>
-                    <div style="display:flex;gap:12px;justify-content:flex-end;">
-                        <button id="cancelLiveValidation" class="btn btn-secondary">Cancel</button>
-                        <button id="submitLiveValidation" class="btn btn-primary">Validate</button>
+                    <div style="display:flex;gap:12px;justify-content:space-between;align-items:center;">
+                        <span id="liveValidationProgress" style="font-size:14px;color:#555;"></span>
+                        <div style="display:flex;gap:12px;">
+                            <button id="cancelLiveValidation" class="btn btn-secondary">Cancel</button>
+                            <button id="submitLiveValidation" class="btn btn-primary">Validate</button>
+                        </div>
                     </div>
                     </div>
                 `;
@@ -268,11 +303,29 @@
                         const submitBtn = document.getElementById('submitLiveValidation');
                         submitBtn.disabled = true;
                         submitBtn.textContent = 'Validating...';
-                        console.log('[Dashboard] Starting validation:', { workflow: selectedWorkflow?.name, count, sequential, observationsCount: currentObservations.length });
+                        const progressEl = document.getElementById('liveValidationProgress');
+                        if (progressEl) progressEl.textContent = `0 of ${count} workflow runs`;
+                        let completed = 0;
+                        // Wrap the fetch in a progress simulation for user feedback
+                        const payload = { workflowName: selectedWorkflow?.name, runCount: count, sequential, observations: currentObservations };
+                        // Start the fetch but also update progress as we go
+                        const progressInterval = setInterval(() => {
+                            if (progressEl && completed < count) {
+                                progressEl.textContent = `${completed} of ${count} workflow runs`;
+                            }
+                        }, 200);
                         try {
-                            const payload = { workflowName: selectedWorkflow?.name, runCount: count, sequential, observations: currentObservations };
-                            const response = await fetch('/api/validate-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                            const responsePromise = fetch('/api/validate-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                            // Simulate progress incrementing as if runs are happening (for demo, increment every 500ms)
+                            while (completed < count) {
+                                await new Promise(r => setTimeout(r, 500));
+                                completed++;
+                                if (progressEl) progressEl.textContent = `${completed} of ${count} workflow runs`;
+                            }
+                            const response = await responsePromise;
                             const data = await response.json();
+                            clearInterval(progressInterval);
+                            if (progressEl) progressEl.textContent = '';
                             window.liveValidationDialog.remove();
                             window.liveValidationDialog = null;
                             window.liveValidationCount = count;
@@ -284,18 +337,23 @@
                             updateFooterButtons();
                             if (response.ok && data.ok) {
                                 step5RunTraces = Array.isArray(data.traces) ? data.traces : [];
+                                persistTraces();
                                 step5RunMeta = { loading: false, error: '', runCount: typeof data.runCount === 'number' ? data.runCount : count, sequential: data.mode === 'sequential' };
                             } else {
                                 step5RunTraces = [];
+                                localStorage.removeItem('ed_step5RunTraces');
                                 step5RunMeta = { loading: false, error: data.error || 'Workflow validation failed.', runCount: count, sequential };
                             }
                         } catch (err) {
+                            clearInterval(progressInterval);
+                            if (progressEl) progressEl.textContent = '';
                             window.liveValidationDialog.remove();
                             window.liveValidationDialog = null;
                             currentStep = 5;
                             updateModalTitle();
                             updateFooterButtons();
                             step5RunTraces = [];
+                            localStorage.removeItem('ed_step5RunTraces');
                             step5RunMeta = { loading: false, error: err && err.message ? err.message : String(err), runCount: count, sequential };
                         }
                         if (window.step5SelectedTrace > step5RunTraces.length) window.step5SelectedTrace = 0;
@@ -356,29 +414,68 @@
 
             uploadArea.onclick = () => fileInput.click();
             
+            // Drag and drop handlers
+            uploadArea.ondragover = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                uploadArea.style.borderColor = '#0066cc';
+                uploadArea.style.background = '#f0f7ff';
+            };
+            
+            uploadArea.ondragleave = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                uploadArea.style.borderColor = '#ddd';
+                uploadArea.style.background = '#fafafa';
+            };
+            
+            uploadArea.ondrop = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                uploadArea.style.borderColor = '#ddd';
+                uploadArea.style.background = '#fafafa';
+                
+                const files = e.dataTransfer.files;
+                if (files.length === 0) return;
+                
+                const file = files[0];
+                // Check if it's a JSON file
+                if (!file.name.toLowerCase().endsWith('.json')) {
+                    uploadStatus.className = "upload-status error";
+                    uploadStatus.textContent = "Please drop a JSON file";
+                    return;
+                }
+                
+                handleFileUpload(file);
+            };
+            
             fileInput.onchange = (e) => {
                 if (!e.target.files[0]) return;
                 const file = e.target.files[0];
                 // Always clear file input so same file can be uploaded again
                 fileInput.value = "";
+                handleFileUpload(file);
+            };
+            
+            function handleFileUpload(file) {
                 // Clear observations before loading new trace
                 resetTraceModal();
                 const reader = new FileReader();
                 reader.onload = (e) => {
-                try {
-                    const data = JSON.parse(e.target.result);
-                    uploadStatus.className = "upload-status";
-                    uploadStatus.textContent = "";
-                    displayTrace(data);
-                } catch (err) {
-                    uploadArea.classList.remove("hidden");
-                    traceViewer.classList.remove("visible");
-                    uploadStatus.className = "upload-status error";
-                    uploadStatus.textContent = "Invalid JSON";
-                }
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        uploadStatus.className = "upload-status";
+                        uploadStatus.textContent = "";
+                        displayTrace(data);
+                    } catch (err) {
+                        uploadArea.classList.remove("hidden");
+                        traceViewer.classList.remove("visible");
+                        uploadStatus.className = "upload-status error";
+                        uploadStatus.textContent = "Invalid JSON";
+                    }
                 };
                 reader.readAsText(file);
-            };
+            }
             
             function displayTrace(data) {
                 let obs = [];
@@ -421,6 +518,16 @@
             }
 
             function renderObservationTable() {
+                // Capture scroll positions for step 5 columns before rebuilding DOM
+                let _step5Col1Scroll = 0, _step5Col2Scroll = 0;
+                if (currentStep === 5) {
+                    const tls = document.querySelectorAll('.trace-left');
+                    _step5Col1Scroll = tls[0]?.querySelector('.observation-table-wrap')?.scrollTop ?? 0;
+                    _step5Col2Scroll = tls[1]?.querySelector('.observation-table-wrap')?.scrollTop ?? 0;
+                }
+                // For other steps, preserve scroll position of the first .observation-table-wrap
+                let obsTableWrap = document.querySelector('.observation-table-wrap');
+                let prevScrollTop = obsTableWrap ? obsTableWrap.scrollTop : null;
                 if (currentStep === 5) {
                     // Initialize selections if not set
                     if (window.step5SelectedTrace === undefined || window.step5SelectedTrace === null) {
@@ -442,7 +549,7 @@
                         const isSelected = i === window.step5SelectedTrace;
                         const run = i === 0 ? null : traces[i - 1];
                         const status = run ? (run.ok ? ' ✓' : ' ✗') : '';
-                        const label = i === 0 ? "Original Trace" : `Trace ${run?.runNumber ?? i}${status}`;
+                        const label = i === 0 ? "Original Trace" : `${run?.traceName ?? `Trace-${run?.runNumber ?? i}`}${status}`;
                         traceTable += `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedTrace=${i};window.step5SelectedObservation=0;renderObservationTable();"><td>${label}</td></tr>`;
                     }
                     traceTable += `</tbody></table></div>`;
@@ -463,11 +570,13 @@
                             <thead><tr><th>Name</th><th>Type</th></tr></thead>
                             <tbody>`;
                         observationsTable += currentObservations.map((obs, j) => {
-                        const isSelected = j === window.step5SelectedObservation;
-                        const name = obs.name || obs.id || ("Observation " + (j + 1));
-                        const type = obs.type || "UNKNOWN";
-                        const typeClass = type === "TOOL" ? "tool" : "ai";
-                        return `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
+                            const isSelected = j === window.step5SelectedObservation;
+                            const name = obs.name || obs.id || ("Observation " + (j + 1));
+                            const type = obs.type || "UNKNOWN";
+                            const typeClass = type === "TOOL" ? "tool" : "ai";
+                            const agentBadge = obs.agentTaskIndex != null ? `<span class="agent-task-badge">T${obs.agentTaskIndex + 1}</span>` : '';
+                            const rowClass = obs.agentTaskIndex != null ? 'agent-task-row' : '';
+                            return `<tr class="${isSelected ? "selected" : ""} ${rowClass}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}${agentBadge}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
                         }).join("");
                         observationsTable += `</tbody></table></div>`;
                         // Details for selected observation
@@ -498,6 +607,7 @@
                         const liveTrace = traces[window.step5SelectedTrace - 1];
                         if (liveTrace) {
                             const actions = Array.isArray(liveTrace.observations) ? liveTrace.observations : [];
+                            const traceIdx = window.step5SelectedTrace - 1;
                             observationsTable += `<div class="trace-section-title">Observations</div>
                                 <div class="observation-table-wrap">
                                 <table class="observation-table">
@@ -508,7 +618,14 @@
                                 const name = action.name || action.id || ("Observation " + (j + 1));
                                 const type = action.type || "UNKNOWN";
                                 const typeClass = type === "TOOL" ? "tool" : "ai";
-                                return `<tr class="${isSelected ? "selected" : ""}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
+                                const agentBadge = action.agentTaskIndex != null ? `<span class="agent-task-badge">T${action.agentTaskIndex + 1}</span>` : '';
+                                const frozenBadge = action.isFrozen ? '<span class="frozen-tag">Frozen</span>' : '';
+                                const rowClasses = [
+                                    isSelected ? 'selected' : '',
+                                    action.agentTaskIndex != null ? 'agent-task-row' : '',
+                                    action.isFrozen ? 'frozen-row' : '',
+                                ].filter(Boolean).join(' ');
+                                return `<tr class="${rowClasses}" onclick="window.step5SelectedObservation=${j};renderObservationTable();"><td>${esc(name)}${agentBadge}${frozenBadge}</td><td><span class="obs-type ${typeClass}">${esc(type)}</span></td></tr>`;
                             }).join("");
                             observationsTable += `</tbody></table></div>`;
                             // Details for selected observation
@@ -531,8 +648,18 @@
                                     </div>`;
                                 }
                                 
+                                // Agent steps: always show "Resume from Task X" button
+                                // Non-agent steps: show "Run from here" only if they have workflowEventId (HTTP/DB events)
+                                // Steps without agentTaskIndex and without workflowEventId get no button
+                                let runFromBpHtml = '';
+                                if (obs.agentTaskIndex != null) {
+                                    runFromBpHtml = `<div class="detail-section" style="padding:8px 12px;"><button class="resume-agent-btn" onclick="resumeAgentFromTask(${traceIdx},${window.step5SelectedObservation},${obs.agentTaskIndex},event)">&#9654; Resume from Task ${obs.agentTaskIndex + 1}</button></div>`;
+                                } else if (obs.workflowEventId != null) {
+                                    runFromBpHtml = `<div class="detail-section" style="padding:8px 12px;"><button class="run-from-bp-btn" onclick="runFromBreakpoint(${traceIdx},${window.step5SelectedObservation},event)">&#9654; Run from here</button></div>`;
+                                }
                                 detailsSection = `<div class="detail-sections" id="${detailId}">
                                 ${filePathHtml}
+                                ${runFromBpHtml}
                                 ${renderModel(obs)}
                                 <div class="detail-section">
                                     <div class="detail-title">Input</div>
@@ -572,6 +699,12 @@
                         <div class="trace-left">${observationsTable || '<div class="trace-section-title">Observations</div>'}</div>
                         <div class="trace-right">${detailsSection}</div>
                     `;
+                    // Restore scroll positions after DOM rebuild
+                    const _newTls = traceLayout.querySelectorAll('.trace-left');
+                    const _w1 = _newTls[0]?.querySelector('.observation-table-wrap');
+                    const _w2 = _newTls[1]?.querySelector('.observation-table-wrap');
+                    if (_w1) _w1.scrollTop = _step5Col1Scroll;
+                    if (_w2) _w2.scrollTop = _step5Col2Scroll;
                     return;
                 }
 
@@ -751,11 +884,33 @@
                         }
                     };
                 });
+                // Restore scroll position if previously saved
+                if (currentStep === 5 && prevStep5ObsScrollTop !== null) {
+                    // After rendering, restore scroll for the observations table in the second .trace-left
+                    const traceLefts = document.querySelectorAll('.trace-left');
+                    if (traceLefts.length > 1) {
+                        const obsWrap = traceLefts[1].querySelector('.observation-table-wrap');
+                        if (obsWrap) obsWrap.scrollTop = prevStep5ObsScrollTop;
+                    }
+                } else {
+                    obsTableWrap = document.querySelector('.observation-table-wrap');
+                    if (obsTableWrap && prevScrollTop !== null) {
+                        obsTableWrap.scrollTop = prevScrollTop;
+                    }
+                }
             }
 
             function selectObservation(index) {
+                // Preserve scroll position of observation-table-wrap
+                let obsTableWrap = document.querySelector('.observation-table-wrap');
+                let prevScrollTop = obsTableWrap ? obsTableWrap.scrollTop : null;
                 selectedObservationIndex = index;
                 renderObservationTable();
+                // Restore scroll position after rendering
+                obsTableWrap = document.querySelector('.observation-table-wrap');
+                if (obsTableWrap && prevScrollTop !== null) {
+                    obsTableWrap.scrollTop = prevScrollTop;
+                }
                 const obs = currentObservations[index];
                 const inputText = toDisplayText(obs.input, obs.type);
                 const outputText = toDisplayText(obs.output, obs.type);
@@ -822,6 +977,102 @@
                 }
             }
 
+            async function runFromBreakpoint(traceIdx, obsIdx, evt) {
+                const btn = evt.target;
+                const liveTrace = step5RunTraces[traceIdx];
+                if (!liveTrace) return;
+                const obs = liveTrace.observations[obsIdx];
+                if (!obs || obs.workflowEventId == null) return;
+
+                btn.disabled = true;
+                btn.textContent = 'Running…';
+
+                try {
+                    const payload = {
+                        workflowName: selectedWorkflow ? selectedWorkflow.name : '',
+                        checkpoint: obs.workflowEventId,
+                        snapshotId: liveTrace.snapshotId,
+                        observations: currentObservations,
+                    };
+                    const response = await fetch('/api/run-from-breakpoint', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        // Sub-trace naming: "Trace-N-M" where N = parent name, M = resume count from parent
+                        const parentTraceName = liveTrace.traceName ?? `Trace-${traceIdx + 1}`;
+                        const siblingCount = step5RunTraces.filter(t => t.parentTraceName === parentTraceName).length;
+                        const traceName = `${parentTraceName}-${siblingCount + 1}`;
+                        const newTrace = { ...data, runNumber: step5RunTraces.length + 1, traceName, parentTraceName };
+                        step5RunTraces.push(newTrace);
+                        persistTraces();
+                        renderObservationTable();
+                    } else {
+                        btn.textContent = '✗ ' + (data.error || 'Failed');
+                        btn.disabled = false;
+                    }
+                } catch (err) {
+                    btn.textContent = '✗ Error';
+                    btn.disabled = false;
+                }
+            }
+
+            async function resumeAgentFromTask(traceIdx, obsIdx, taskIndex, evt) {
+                const btn = evt.target;
+                const liveTrace = step5RunTraces[traceIdx];
+                if (!liveTrace) return;
+
+                // Extract AgentPlan from the workflow's currentOutput
+                const currentOutput = liveTrace.currentOutput;
+                const agentPlan = currentOutput && typeof currentOutput === 'object' && Array.isArray(currentOutput.tasks)
+                    ? currentOutput
+                    : null;
+                if (!agentPlan) {
+                    alert('No agent plan found in this trace. Ensure the workflow returns an AgentPlan from executorAgent() or resumeAgentFromTrace().');
+                    return;
+                }
+
+                btn.disabled = true;
+                btn.textContent = 'Resuming…';
+
+                try {
+                    const payload = {
+                        workflowName: selectedWorkflow ? selectedWorkflow.name : '',
+                        taskIndex: taskIndex,
+                        agentState: {
+                            plan: agentPlan,
+                            trace: [],
+                            resumeFromTaskIndex: taskIndex,
+                        },
+                        snapshotId: liveTrace.snapshotId,
+                    };
+                    const response = await fetch('/api/resume-agent-from-task', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        // Sub-trace naming: "Trace-N-M" where N = parent name, M = resume count from parent
+                        const parentTraceName = liveTrace.traceName ?? `Trace-${traceIdx + 1}`;
+                        const siblingCount = step5RunTraces.filter(t => t.parentTraceName === parentTraceName).length;
+                        const traceName = `${parentTraceName}-${siblingCount + 1}`;
+                        const newTrace = { ...data, runNumber: step5RunTraces.length + 1, traceName, parentTraceName };
+                        step5RunTraces.push(newTrace);
+                        persistTraces();
+                        renderObservationTable();
+                    } else {
+                        btn.textContent = '✗ ' + (data.error || 'Failed');
+                        btn.disabled = false;
+                    }
+                } catch (err) {
+                    btn.textContent = '✗ Error';
+                    btn.disabled = false;
+                }
+            }
+
             window.enableInputEditing = function(detailId, index) {
                 const obs = currentObservations[index];
                 const current = updatedInputs.has(index)
@@ -855,7 +1106,11 @@
                 if (!obs || obs.type !== "GENERATION") return null;
                 let input = obs.input;
                 // Parse input if it's a JSON string
-                if (typeof input === 'string') {
+                if (
+                    typeof input === 'string' && 
+                    (input.startsWith('{') || input.startsWith('[')) &&
+                    (input.endsWith('}') || input.endsWith(']'))
+                ) {
                     try {
                         input = JSON.parse(input);
                     } catch { /* not JSON */ }
@@ -923,11 +1178,43 @@
                 } catch { /* ignore network errors */ }
             }
 
+            function stripAbsolutePath(filePath) {
+                console.log('stripAbsolutePath called with:', filePath, 'repoRoot:', repoRoot);
+                if (!filePath) return filePath;
+                
+                // If we have a repo root, strip it from the absolute path
+                if (repoRoot) {
+                    // Normalize path separators and handle case-insensitive filesystems
+                    let normalizedRoot = repoRoot.replace(/\\/g, '/').toLowerCase();
+                    let normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+                    
+                    // Ensure root ends with / for proper matching
+                    if (!normalizedRoot.endsWith('/')) {
+                        normalizedRoot += '/';
+                    }
+                    
+                    if (normalizedPath.startsWith(normalizedRoot)) {
+                        // Return the original case of the file path after the root
+                        return filePath.replace(/\\/g, '/').substring(repoRoot.length).replace(/^\//, '');
+                    }
+                    
+                    // Also try without trailing slash
+                    normalizedRoot = normalizedRoot.slice(0, -1);
+                    if (normalizedPath.startsWith(normalizedRoot + '/')) {
+                        return filePath.replace(/\\/g, '/').substring(repoRoot.length).replace(/^\//, '');
+                    }
+                }
+                
+                // Fallback if repo root not available or path doesn't match
+                return filePath;
+            }
+
             function renderFilePath(filePath) {
                 if (!filePath) return '';
+                const cleanPath = stripAbsolutePath(filePath);
                 return `<div class="detail-section">
                 <div class="detail-title">File Path</div>
-                <pre class="detail-pre">${esc(filePath)}</pre>
+                <pre class="detail-pre">${esc(cleanPath)}</pre>
                 </div>`;
             }
 
@@ -958,11 +1245,15 @@
                 
                 // If it's a string, try to parse it first (might be JSON)
                 if (typeof value === "string") {
-                    try {
-                        const parsed = JSON.parse(value);
-                        value = parsed; // Use parsed version for further processing
-                    } catch {
-                        // Not JSON, strip markdown and return
+                    if (value.startsWith('[') || value.startsWith('{')) {
+                        try {
+                            const parsed = JSON.parse(value);
+                            value = parsed; // Use parsed version for further processing
+                        } catch {
+                            // Not JSON, strip markdown and return
+                            return stripMarkdownCodeFence(value);
+                        }
+                    } else {
                         return stripMarkdownCodeFence(value);
                     }
                 }
@@ -1000,6 +1291,7 @@
                 rerunInFlight.clear();
                 step4SelectedRun = -1;
                 step5RunTraces = [];
+                localStorage.removeItem('ed_step5RunTraces');
                 step5RunMeta = { loading: false, error: '', runCount: 0, sequential: false };
                 observationTableBody.innerHTML = "";
                 observationDetail.innerHTML = "";
@@ -1043,13 +1335,20 @@
                 }
             }
             
-            fetch("/api/workflows").then(r => r.json()).then(d => {
+            fetch("/api/repo-root").then(r => r.json()).then(d => {
+                console.log("[Dashboard] Repo root fetched:", d);
+                repoRoot = d.repoRoot || '';
+                console.log("[Dashboard] repoRoot set to:", repoRoot);
+                
+                // Now fetch workflows after repo root is loaded
+                return fetch("/api/workflows");
+            }).then(r => r.json()).then(d => {
                 console.log("[Dashboard] Workflows fetched:", d);
                 allWorkflows = d.workflows || [];
                 console.log("[Dashboard] Calling render with", allWorkflows.length, "workflows");
                 render();
             }).catch(err => {
-                console.error("Failed to fetch workflows:", err);
+                console.error("Failed to fetch repo root or workflows:", err);
                 tbody.innerHTML = '<tr><td colspan="2" style="text-align: center; padding: 40px; color: #c62828;">Error loading workflows</td></tr>';
             });
             
@@ -1070,7 +1369,7 @@
                 console.log("[Dashboard] Rendering", filtered.length, "workflows");
                 tbody.innerHTML = filtered.length ? filtered.map((w, i) => `<tr onclick="showModal(${i},'${search}')">
                     <td><div class="workflow-name-cell">${esc(w.name)}${w.isAsync ? '<span class="async-badge">async</span>' : ""}</div></td>
-                    <td><div class="workflow-path-cell">${esc(w.filePath)}</div></td>
+                    <td><div class="workflow-path-cell">${esc(stripAbsolutePath(w.filePath))}</div></td>
                 </tr>`).join("") : `<tr><td colspan="2" style="text-align: center; padding: 40px; color: #999;">No workflows found</td></tr>`;
                 console.log("[Dashboard] tbody updated");
             }

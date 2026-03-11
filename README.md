@@ -2,11 +2,31 @@
 
 An AI-native test runner for ElasticDash workflow testing. Built for async AI pipelines — not a general-purpose test runner.
 
-- Trace-first: every test receives a `trace` context to record and assert on LLM calls and tool invocations
-- Automatic fetch interception for OpenAI, Gemini, and Grok — no manual instrumentation required
-- AI-specific matchers: `toHaveLLMStep`, `toCallTool`, `toMatchSemanticOutput`, `toHaveCustomStep`, `toHavePromptWhere`, `toEvaluateOutputMetric`
-- Sequential execution, no parallelism overhead
-- No Jest dependency
+## Quick Links
+
+### Jump to Key Sections
+- [Quick Start](#quick-start)
+- [Documentation](#documentation)
+- [Tool Recording](#tool-recording)
+- [Configuration](#configuration)
+
+### Open Detailed Docs
+- **[Quick Start Guide](docs/quickstart.md)** ← Start here to set up your first workflow
+- [Test Writing Guidelines](docs/test-writing-guidelines.md)
+- [Test Matchers](docs/matchers.md)
+- [Tool Recording and Replay](docs/tools.md)
+- [Workflows Dashboard](docs/dashboard.md)
+- [Agent Mid-Trace Replay](docs/agents.md)
+- [Deno Support](docs/deno.md)
+
+## Features
+
+- 🎯 **Trace-first testing** — every test gets a `trace` context to record and assert on LLM calls and tool invocations
+- 🔍 **Automatic AI interception** — captures OpenAI, Gemini, and Grok calls without code changes
+- 🧪 **AI-specific matchers** — semantic output matching, LLM-judged evaluations, prompt assertions
+- 🛠️ **Tool recording & replay** — automatically trace tool calls with checkpoint-based replay
+- 📊 **Interactive dashboard** — browse workflows, debug traces, validate fixes visually
+- 🤖 **Agent mid-trace replay** — resume long-running agents from any task without re-execution
 
 ---
 
@@ -16,7 +36,28 @@ An AI-native test runner for ElasticDash workflow testing. Built for async AI pi
 npm install elasticdash-test
 ```
 
-Requires Node 20+. For Deno projects, see [Using elasticdash-test in Deno](docs/deno.md).
+**Requirements:** Node 20+. For Deno projects, see [Using elasticdash-test in Deno](docs/deno.md).
+
+**Git ignore:** ElasticDash writes temporary runtime artifacts under `.temp/`. Add this to your `.gitignore`:
+
+```gitignore
+.temp/
+```
+
+**Running CLI commands:** Use `npx` to run commands with your locally installed version (recommended to avoid version drift):
+
+```bash
+npx elasticdash test
+npx elasticdash dashboard
+```
+
+Alternatively, install globally if you prefer shorter commands:
+
+```bash
+npm install -g elasticdash-test
+elasticdash test
+elasticdash dashboard
+```
 
 ---
 
@@ -39,9 +80,9 @@ aiTest('checkout flow', async (ctx) => {
 **2. Run it:**
 
 ```bash
-elasticdash test              # discover all *.ai.test.ts files
-elasticdash test ./ai-tests   # discover in a specific directory
-elasticdash run my-flow.ai.test.ts  # run a single file
+npx elasticdash test              # discover all * *.ai.test.ts files
+npx elasticdash test ./ai-tests   # discover in a specific directory
+npx elasticdash run my-flow.ai.test.ts  # run a single file
 ```
 
 **3. Read the output:**
@@ -57,39 +98,45 @@ Total: 3
 Duration: 3.4s
 ```
 
+**Workflow export requirements:**
+
+- Export plain callable functions from `ed_workflows.ts/js`.
+- Use JSON-serializable inputs/outputs (object or array) so dashboard replay can pass args and read results.
+- Do not export framework-bound handlers directly (for example Next.js `NextRequest`/`NextResponse` route handlers).
+
 ---
 
-## Writing Tests
+## Documentation
 
-See the full guide in [docs/test-writing-guidelines.md](docs/test-writing-guidelines.md).
+### Core Concepts
+- **[Test Writing Guidelines](docs/test-writing-guidelines.md)** — comprehensive guide to writing AI workflow tests
+- **[Test Matchers](docs/matchers.md)** — all available matchers with examples
+- **[Tool Recording & Replay](docs/tools.md)** — automatic tool tracing and checkpoint-based replay
 
-### Globals
+### Advanced Features  
+- **[Workflows Dashboard](docs/dashboard.md)** — interactive workflow browser, debugger, and fetching traces from Langfuse
+- **[Agent Mid-Trace Replay](docs/agents.md)** — resume long-running agents from any task
+- **[Deno Support](docs/deno.md)** — using ElasticDash Test in Deno projects
 
-After importing `test-setup`, these are available globally — no imports needed:
+---
+
+## Quick Reference
+
+### Test Globals
 
 | Global | Description |
 |---|---|
 | `aiTest(name, fn)` | Register a test |
 | `beforeAll(fn)` | Run once before all tests in the file |
 | `beforeEach(fn)` | Run before every test in the file |
-| `afterEach(fn)` | Run after every test in the file (runs even if the test fails) |
+| `afterEach(fn)` | Run after every test in the file (runs even if test fails) |
 | `afterAll(fn)` | Run once after all tests in the file |
 
-### Test context
+### Recording Trace Data
 
-Each test function receives a `ctx: AITestContext` argument:
+**Automatic (recommended):** Workflow code making real API calls to OpenAI, Gemini, or Grok is automatically intercepted and recorded.
 
-```ts
-aiTest('my test', async (ctx) => {
-  // ctx.trace — record and inspect LLM steps and tool calls
-})
-```
-
-### Recording trace data
-
-**Automatic interception (recommended):** When your workflow code makes real API calls to OpenAI, Gemini, or Grok, the runner intercepts them automatically and records the LLM step — no changes to your workflow code needed. See [Automatic AI Interception](#automatic-ai-interception) below.
-
-**Manual recording:** Use this for providers not covered by the interceptor, when testing against stubs/mocks, or to capture RAG / code / fixed steps:
+**Manual (for custom providers or mocks):**
 
 ```ts
 ctx.trace.recordLLMStep({
@@ -103,233 +150,86 @@ ctx.trace.recordToolCall({
   args: { amount: 99.99 },
 })
 
-// Record custom workflow steps (RAG fetches, code/fixed steps, etc.)
 ctx.trace.recordCustomStep({
-  kind: 'rag',              // 'rag' | 'code' | 'fixed' | 'custom'
+  kind: 'rag',
   name: 'pokemon-search',
-  tags: ['sort:asc', 'source:db'],
-  payload: { query: 'pikachu attack' },
+  payload: { query: 'pikachu' },
   result: { ids: [25] },
-  metadata: { latencyMs: 120 },
 })
 ```
 
-### Matchers
-
-#### `toHaveLLMStep(config?)`
-
-Assert the trace contains at least one LLM step matching the given config. All fields are optional and combined with AND logic.
+### Common Matchers
 
 ```ts
+// Assert LLM calls
 expect(ctx.trace).toHaveLLMStep({ model: 'gpt-4' })
-expect(ctx.trace).toHaveLLMStep({ contains: 'order confirmed' })       // searches prompt + completion
-expect(ctx.trace).toHaveLLMStep({ promptContains: 'order status' })    // searches prompt only
-expect(ctx.trace).toHaveLLMStep({ outputContains: 'order confirmed' }) // searches completion only
-expect(ctx.trace).toHaveLLMStep({ provider: 'openai' })
-expect(ctx.trace).toHaveLLMStep({ provider: 'openai', promptContains: 'order status' })
-expect(ctx.trace).toHaveLLMStep({ promptContains: 'retry', times: 3 })      // exactly 3 matching steps
-expect(ctx.trace).toHaveLLMStep({ provider: 'openai', minTimes: 2 })        // at least 2 matching steps
-expect(ctx.trace).toHaveLLMStep({ outputContains: 'error', maxTimes: 1 })   // at most 1 matching step
-```
+expect(ctx.trace).toHaveLLMStep({ promptContains: 'order status' })
 
-| Field | Description |
-|---|---|
-| `model` | Exact model name match (e.g. `'gpt-4o'`) |
-| `contains` | Substring match across prompt + completion (case-insensitive) |
-| `promptContains` | Substring match in prompt only (case-insensitive) |
-| `outputContains` | Substring match in completion only (case-insensitive) |
-| `provider` | Provider name: `'openai'`, `'gemini'`, or `'grok'` |
-| `times` | Exact match count (fails unless exactly this many steps match) |
-| `minTimes` | Minimum match count (steps matching must be ≥ this value) |
-| `maxTimes` | Maximum match count (steps matching must be ≤ this value) |
-
-#### `toCallTool(toolName)`
-
-Assert the trace contains a tool call with the given name.
-
-```ts
+// Assert tool calls
 expect(ctx.trace).toCallTool('chargeCard')
-```
 
-#### `toMatchSemanticOutput(expected, options?)`
-
-LLM-judged semantic match of combined LLM output vs. the expected string. Defaults to OpenAI GPT-4.1 with `OPENAI_API_KEY`. Optional options:
-
-```ts
-expect(ctx.trace).toMatchSemanticOutput('attack stat', {
-  provider: 'claude',               // 'openai' (default) | 'claude' | 'gemini' | 'grok'
-  model: 'claude-3-opus-20240229',  // overrides default model for the provider
-  sdk: myClaudeClient,              // optional SDK instance (uses its chat/messages API)
-})
-
-// Minimal, using default OpenAI model
+// Semantic output matching (LLM-judged)
 expect(ctx.trace).toMatchSemanticOutput('order confirmed')
 
-// OpenAI-compatible endpoint (e.g., Moonshot/Kimi) via baseURL + apiKey
-expect(ctx.trace).toMatchSemanticOutput('order confirmed', {
-  provider: 'openai',
-  model: 'kimi-k2-turbo-preview',
-  apiKey: process.env.KIMI_API_KEY,
-  baseURL: 'https://api.moonshot.ai/v1',
-})
-```
-
-Environment keys by provider: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `GROK_API_KEY`.
-For OpenAI-compatible endpoints, pass `apiKey`/`baseURL` in options or set an appropriate env var used by your SDK.
-
-#### `toEvaluateOutputMetric(config)`
-
-Evaluate one LLM step’s prompt or result using an LLM and assert a numeric metric condition in the range 0.0–1.0. Defaults: target=`result`, condition=`atLeast 0.7`, provider=`openai`, model=`gpt-4.1`.
-
-```ts
-// Evaluate the last LLM result with your own prompt; default condition atLeast 0.7
-expect(ctx.trace).toEvaluateOutputMetric({
-  evaluationPrompt: 'Rate how well this answers the user question.',
-})
-
-// Check a specific step (3rd LLM prompt), target the prompt text, require >= 0.8 via Claude
-expect(ctx.trace).toEvaluateOutputMetric({
-  evaluationPrompt: 'Score coherence of this prompt between 0 and 1.',
-  target: 'prompt',
-  nth: 3,
-  condition: { atLeast: 0.8 },
-  provider: 'claude',
-  model: 'claude-3-opus-20240229',
-})
-
-// Custom comparator: score must be < 0.3
-expect(ctx.trace).toEvaluateOutputMetric({
-  evaluationPrompt: 'Rate hallucination risk (0=none, 1=high).',
-  condition: { lessThan: 0.3 },
-})
-```
-
-Options:
-- `evaluationPrompt` (required): your scoring instructions; model is asked to return only a number between 0 and 1.
-- `target`: `'result'` (default) or `'prompt'`. Mutually exclusive; evaluates that text only.
-- `index` / `nth`: pick which LLM step to score (0-based or 1-based). Defaults to the last LLM step.
-- `condition`: one of `greaterThan`, `lessThan`, `atLeast`, `atMost`, `equals`; default is `{ atLeast: 0.7 }`. Fails if the score is outside 0.0–1.0 or cannot be parsed.
-- `provider` / `model` / `sdk` / `apiKey` / `baseURL`: same shape as `toMatchSemanticOutput` (supports OpenAI, Claude, Gemini, Grok, and OpenAI-compatible via `baseURL`). Requires corresponding API key if no SDK is supplied.
-
-#### `toHaveCustomStep(config?)`
-
-Assert a recorded custom step (RAG/code/fixed/custom) matches filters.
-
-```ts
+// Custom steps (RAG, code, fixed)
 expect(ctx.trace).toHaveCustomStep({ kind: 'rag', name: 'pokemon-search' })
-expect(ctx.trace).toHaveCustomStep({ tag: 'sort:asc' })
-expect(ctx.trace).toHaveCustomStep({ contains: 'pikachu' })
-expect(ctx.trace).toHaveCustomStep({ resultContains: '25' })
-expect(ctx.trace).toHaveCustomStep({ kind: 'rag', minTimes: 1, maxTimes: 2 })
 ```
 
-#### `toHavePromptWhere(config)`
-
-Filter prompts, then assert additional constraints. Example: “all prompts containing A must also contain B”.
-
-```ts
-// Prompts that contain "order" must also contain "confirmed"
-expect(ctx.trace).toHavePromptWhere({
-  filterContains: 'order',
-  requireContains: 'confirmed',
-})
-
-// Prompts containing "retry" must NOT contain "cancel"
-expect(ctx.trace).toHavePromptWhere({
-  filterContains: 'retry',
-  requireNotContains: 'cancel',
-})
-
-// And control counts on the filtered subset
-expect(ctx.trace).toHavePromptWhere({
-  filterContains: 'order',
-  requireContains: 'confirmed',
-  minTimes: 1,
-  maxTimes: 3,
-})
-
-// Check a specific prompt position (1-based nth or 0-based index)
-expect(ctx.trace).toHavePromptWhere({
-  filterContains: 'order',
-  requireContains: 'confirmed',
-  nth: 3, // the 3rd prompt among those containing "order"
-})
-```
+**→ See [Test Matchers](docs/matchers.md) for complete documentation**
 
 ---
 
-## Automatic AI Interception
+## Automatic AI & Tool Tracing
 
-The runner patches `globalThis.fetch` before tests run and automatically records LLM steps for calls to the following endpoints:
+### AI Interception
 
-| Provider | Endpoints intercepted |
-|---|---|
-| **OpenAI** | `api.openai.com/v1/chat/completions`, `/v1/completions` |
-| **Gemini** | `generativelanguage.googleapis.com/.../models/...:generateContent` |
-| **Grok** (xAI) | `api.x.ai/v1/chat/completions` |
+The runner automatically intercepts and records calls to:
+- OpenAI (`api.openai.com`)
+- Gemini (`generativelanguage.googleapis.com`)
+- Grok/xAI (`api.x.ai`)
 
-Each intercepted call records `model`, `provider`, `prompt`, and `completion` into `ctx.trace` automatically. Your workflow code needs no changes.
+No code changes needed — just run your workflow and assertions work automatically.
 
-```ts
-aiTest('user lookup flow', async (ctx) => {
-  // This makes a real OpenAI call — intercepted automatically
-  await myWorkflow.run('Find all active users')
+### Tool Recording
 
-  // Works without any ctx.trace.recordLLMStep() in your workflow
-  expect(ctx.trace).toHaveLLMStep({ promptContains: 'Find all active users' })
-  expect(ctx.trace).toHaveLLMStep({ provider: 'openai' })
-})
-```
-
-**Streaming:** When `stream: true` is set on a request, the completion is recorded as `"(streamed)"` — the prompt and model are still captured.
-
-**Libraries using `https.request` directly** (older versions of some SDKs) are not covered by fetch interception. Use manual `ctx.trace.recordLLMStep()` for those.
-
-### Recording flow steps without passing `ctx.trace` (AsyncLocalStorage)
-
-The runner now sets a per-test `currentTrace` using Node’s `AsyncLocalStorage`, so your app code can record steps without threading `ctx.trace` through every function. This remains safe under parallel execution.
+Manual instrumentation pattern: isolate tracing in the service `.then/.catch` path so tracing failures never block business logic:
 
 ```ts
-// In your test
-import { setCurrentTrace } from 'elasticdash-test'
+import { runSelectQuery } from './services/dataService'
 
-aiTest('flow test', async (ctx) => {
-  setCurrentTrace(ctx.trace)          // bind the trace to the current async context
-  await runFlowWithoutTraceArg()      // your existing code
-  // assertions
-  expect(ctx.trace).toHaveCustomStep({ kind: 'rag', name: 'pokemon-search' })
-})
-
-// In your app/flow code (called during the test)
-import { getCurrentTrace } from 'elasticdash-test'
-
-function runFlowWithoutTraceArg() {
-  const trace = getCurrentTrace()
-  trace?.recordCustomStep({
-    kind: 'rag',
-    name: 'pokemon-search',
-    payload: { query: 'pikachu attack' },
-    result: { ids: [25] },
-    tags: ['source:db', 'sort:asc'],
-  })
+export const dataService = async (input: any) => {
+  const { query } = input as { query: string }
+  return await runSelectQuery(query)
+    .then(async (res: any) => {
+      try {
+        const { recordToolCall } = await import('elasticdash-test')
+        recordToolCall('dataService', input, res)
+      } catch {
+        // tracing must never block the main service path
+      }
+      return res
+    })
+    .catch(async (err: any) => {
+      try {
+        const { recordToolCall } = await import('elasticdash-test')
+        recordToolCall('dataService', input, err)
+      } catch {
+        // tracing must never block the main service path
+      }
+      throw err
+    })
 }
 ```
 
-Notes:
-- Works per async context; if you spawn detached work (child processes/independent workers), pass `trace` explicitly there.
-- Still compatible with manual DI: you can continue passing `ctx.trace` explicitly if you prefer.
+In manual mode, always isolate tracing in a separate `try/catch` so trace logging errors cannot interrupt core service execution.
 
-### Optional local LLM capture proxy (for Supabase Edge / Deno)
-- Opt in by setting `ELASTICDASH_LLM_PROXY=1` (optional: `ELASTICDASH_LLM_PROXY_PORT`, default `8787`). The runner will start a local proxy and generate a per-test `ELASTICDASH_TRACE_ID`.
-- Point your LLM client at the proxy via base URL envs (e.g., `OPENAI_BASE_URL=http://localhost:8787/v1`, `ANTHROPIC_API_URL=http://localhost:8787`). No code changes in your workflow; only env overrides when running tests.
-- Forward the trace ID to your Edge/Deno code (e.g., add `x-trace-id: process.env.ELASTICDASH_TRACE_ID` on the request to your Supabase Edge function). The proxy records model/prompt/completion (or `(streamed)`) and the runner folds captured steps back into `ctx.trace` after each test.
-- When `ELASTICDASH_LLM_PROXY` is unset, behavior is unchanged and the existing Node fetch interceptor remains the default.
+**→ See [Tool Recording & Replay](docs/tools.md) for checkpoint-based replay and freezing**
 
 ---
 
 ## Configuration
 
-Create an optional `elasticdash.config.ts` at the project root:
+Optional `elasticdash.config.ts` at project root:
 
 ```ts
 export default {
@@ -338,143 +238,17 @@ export default {
 }
 ```
 
-| Option | Default | Description |
-|---|---|---|
-| `testMatch` | `['**/*.ai.test.ts']` | Glob patterns for test discovery |
-| `traceMode` | `'local'` | `'local'` (stub) or `'remote'` (future ElasticDash backend) |
-
----
+Optional project file: `ed_workers.ts` can be used by your app architecture (for example, exporting worker handlers), but it is not required or discovered by the ElasticDash CLI/dashboard.
 
 ## TypeScript Setup
 
-Add an `examples/tsconfig.json` (or your test directory's `tsconfig.json`) that extends the root config and includes the `src` types:
+For typed globals and matchers, extend your test directory's `tsconfig.json`:
 
 ```json
 {
   "extends": "../tsconfig.json",
-  "compilerOptions": {
-    "rootDir": "..",
-    "noEmit": true
-  },
-  "include": [
-    "../src/**/*",
-    "./**/*"
-  ]
+  "include": ["../src/**/*", "./**/*"]
 }
-```
-
-This gives you typed `aiTest`, `beforeAll`, `afterAll` globals and typed custom matchers in your test files.
-
----
-
-## Workflows Dashboard
-
-Browse and search all available workflow functions in your project:
-
-```bash
-elasticdash dashboard         # open dashboard at http://localhost:4573
-elasticdash dashboard --port 4572  # use custom port
-elasticdash dashboard --no-open    # skip auto-opening browser
-```
-
-The dashboard scans your workflow/tool files and displays:
-  - If both `.ts` and `.js` versions of a file exist (e.g., `ed_workflows.ts` and `ed_workflows.js`), the dashboard will always use the `.ts` file.
-  - If only `.ts` exists, it will be automatically transpiled to `.js` before scanning/importing—no manual build step required.
-  - If only `.js` exists, it will be used directly.
-
-This means you can write your workflows and tools in TypeScript, and the dashboard will handle transpilation automatically. You do not need to run `tsc` or build manually for dashboard usage.
-
-**Example file selection logic:**
-| Scenario                | File Used         |
-|-------------------------|------------------|
-| Only `ed_workflows.ts`   | Transpiled `.ts` |
-| Only `ed_workflows.js`   | `.js`            |
-| Both exist              | `.ts` (preferred)|
-
-The dashboard displays:
-  - **Function names** — all exported functions in the module
-  - **Signatures** — function parameters and return types
-  - **Async indicator** — marks async vs sync functions
-  - **Source module** — where the function is imported from (if re-exported)
-  - **File path** — location of the workflow file
-
-Use the search field to filter workflows by:
-- **Name** — find workflow by function name (e.g., `checkoutFlow`)
-- **Source module** — find all workflows from a specific module (e.g., `app.workflows`)
-- **File path** — filter by location in your codebase
-
-This is useful for discovering available workflows, understanding their signatures, and identifying where functions are defined before calling them in tests.
-
-### `ed_workflows.ts`, `ed_tools.ts`, `ed_agents.ts`
-
-These optional files bundle and re-export existing functions from your codebase for use in tests.
-
-#### `ed_workflows.ts`
-
-Re-export workflow functions from your application:
-
-```ts
-// ed_workflows.ts
-export { orderWorkflow, refundWorkflow } from './src/workflows'
-export { userLookupFlow } from './src/user-flows'
-```
-
-Access in tests:
-
-```ts
-import { orderWorkflow } from './ed_workflows'
-
-aiTest('full order workflow', async (ctx) => {
-  const result = await orderWorkflow('order-123', 'cust-456')
-  expect(ctx.trace).toCallTool('chargeCard')
-})
-```
-
-#### `ed_tools.ts`
-
-Re-export tool functions that agents or workflows can invoke:
-
-```ts
-// ed_tools.ts
-export { chargeCard, fetchOrderStatus, sendNotification } from './src/tools'
-```
-
-#### `ed_agents.ts`
-
-Re-export agent functions or create a config object:
-
-```ts
-// ed_agents.ts
-export { checkoutAgent, paymentAgent } from './src/agents'
-
-// Or as a config object:
-export const agents = {
-  checkout: checkoutAgent,
-  payment: paymentAgent,
-}
-```
-
-The dashboard command will scan these files and display all exported functions with their signatures, making it easy to explore your workflow API.
-
----
-
-## Project Structure
-
-```
-src/
-  cli.ts                 CLI entry point (commander + fast-glob)
-  runner.ts              Sequential test runner engine
-  reporter.ts            Color-coded terminal output
-  test-setup.ts          Import in test files for globals + matcher types
-  index.ts               Programmatic API
-  core/
-    registry.ts          aiTest / beforeAll / afterAll registry
-  trace-adapter/
-    context.ts           TraceHandle, AITestContext, RunnerHooks scaffold
-  matchers/
-    index.ts             Custom expect matchers
-  interceptors/
-    ai-interceptor.ts    Automatic fetch interceptor for OpenAI / Gemini / Grok
 ```
 
 ---
@@ -482,28 +256,14 @@ src/
 ## Programmatic API
 
 ```ts
-import { runFiles, reportResults, registerMatchers, installAIInterceptor, uninstallAIInterceptor } from 'elasticdash-test'
+import { runFiles, reportResults, registerMatchers, installAIInterceptor } from 'elasticdash-test'
 
 registerMatchers()
-installAIInterceptor()   // patch globalThis.fetch for automatic LLM tracing
+installAIInterceptor()
 
 const results = await runFiles(['./tests/flow.ai.test.ts'])
 reportResults(results)
-
-uninstallAIInterceptor() // restore original fetch when done
 ```
-
----
-
-## Non-Goals
-
-This runner intentionally does not support:
-
-- Parallel execution
-- Watch mode
-- Snapshot testing
-- Coverage reporting
-- Jest compatibility
 
 ---
 

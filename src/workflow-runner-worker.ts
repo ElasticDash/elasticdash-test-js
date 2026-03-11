@@ -1,3 +1,8 @@
+// Mark this process as an Elasticdash worker before anything else runs
+;(globalThis as any).__ELASTICDASH_WORKER__ = true
+
+// Ensure .env is loaded in the worker subprocess
+import 'dotenv/config'
 /**
  * workflow-runner-worker.ts
  *
@@ -13,24 +18,41 @@
 
 import { startTraceSession, setCurrentTrace } from './trace-adapter/context.js'
 import { installAIInterceptor, uninstallAIInterceptor } from './interceptors/ai-interceptor.js'
+import { TraceRecorder, setCaptureContext, getCaptureContext } from './capture/recorder.js'
+import { ReplayController } from './capture/replay.js'
+import { interceptFetch, restoreFetch } from './interceptors/http.js'
+import { interceptRandom, restoreRandom, interceptDateNow, restoreDateNow, rawDateNow } from './interceptors/side-effects.js'
+import { installDBAutoInterceptor, uninstallDBAutoInterceptor } from './interceptors/db-auto.js'
+import { pathToFileURL } from 'url'
 import type { TraceHandle } from './trace-adapter/context.js'
+import type { WorkflowEvent } from './capture/event.js'
+import type { AgentState } from './types/agent.js'
+import fs from 'node:fs'
+
+const TOOL_WRAPPER_ACTIVE_KEY = '__elasticdash_tool_wrapper_active__'
 
 async function readStdin(): Promise<string> {
   let raw = ''
   for await (const chunk of process.stdin) {
     raw += chunk
   }
-  return raw
+  return raw.trim()
 }
 
-const RESULT_PREFIX = '__ELASTICDASH_RESULT__:'
 
-/** Write the result line and wait for the OS to accept the write before returning. */
+/** Write the result JSON to fd3 pipe and wait for flush. */
 function writeResult(result: unknown): Promise<void> {
   return new Promise((resolve, reject) => {
-    process.stdout.write(RESULT_PREFIX + JSON.stringify(result) + '\n', (err) =>
-      err ? reject(err) : resolve()
-    )
+    try {
+      const fd = 3
+      const json = JSON.stringify(result)
+      fs.write(fd, json + '\n', (err) => {
+        if (err) reject(err)
+        else resolve()
+      })
+    } catch (e) {
+      reject(e)
+    }
   })
 }
 
@@ -40,23 +62,60 @@ async function loadAndWrapTools(
   trace: TraceHandle,
 ): Promise<Record<string, (...a: unknown[]) => unknown>> {
   try {
-    const toolsMod = await import(toolsModulePath)
+    // Use absolute file URL for ESM import
+    const toolsMod = await import(pathToFileURL(toolsModulePath).href)
     const wrapped: Record<string, (...a: unknown[]) => unknown> = {}
     for (const [name, fn] of Object.entries(toolsMod)) {
       if (typeof fn !== 'function') continue
       wrapped[name] = new Proxy(fn as (...a: unknown[]) => unknown, {
         apply(target, thisArg, args) {
-          const result = Reflect.apply(target, thisArg, args)
+          const recordedArgs = args.length === 1 ? args[0] : args
+          const ctx = getCaptureContext()
+          const id = ctx ? ctx.recorder.nextId() : -1
+          const start = rawDateNow()
+
+          // Replay: return historical result without executing
+          if (ctx && ctx.replay.shouldReplay(id)) {
+            const historical = ctx.replay.getRecordedEvent(id)
+            if (historical) ctx.recorder.record(historical)
+            const replayed = ctx.replay.getRecordedResult(id)
+            trace.recordToolCall({ name, args: recordedArgs, result: replayed, workflowEventId: id })
+            return replayed
+          }
+
+          const g = globalThis as Record<string, unknown>
+          const prev = g[TOOL_WRAPPER_ACTIVE_KEY]
+          const restoreWrapperFlag = () => {
+            if (prev === undefined) delete g[TOOL_WRAPPER_ACTIVE_KEY]
+            else g[TOOL_WRAPPER_ACTIVE_KEY] = prev
+          }
+
+          g[TOOL_WRAPPER_ACTIVE_KEY] = true
+
+          let result: unknown
+          try {
+            result = Reflect.apply(target, thisArg, args)
+          } catch (e) {
+            restoreWrapperFlag()
+            throw e
+          }
+
           if (result && typeof (result as Promise<unknown>).then === 'function') {
             return (result as Promise<unknown>).then((v: unknown) => {
-              trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result: v })
+              restoreWrapperFlag()
+              if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: v, timestamp: start, durationMs: rawDateNow() - start })
+              trace.recordToolCall({ name, args: recordedArgs, result: v, workflowEventId: id })
               return v
             }).catch((e: unknown) => {
-              trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result: { error: String(e) } })
+              restoreWrapperFlag()
+              if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: { error: String(e) }, timestamp: start, durationMs: rawDateNow() - start })
+              trace.recordToolCall({ name, args: recordedArgs, result: { error: String(e) }, workflowEventId: id })
               throw e
             })
           }
-          trace.recordToolCall({ name, args: args.length === 1 ? (args[0] as Record<string, unknown>) : (args as unknown as Record<string, unknown>), result })
+          restoreWrapperFlag()
+          if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: result, timestamp: start, durationMs: rawDateNow() - start })
+          trace.recordToolCall({ name, args: recordedArgs, result, workflowEventId: id })
           return result
         },
       })
@@ -79,6 +138,11 @@ async function main() {
     workflowName: string
     args: unknown[]
     input: unknown
+    replayMode?: boolean
+    checkpoint?: number
+    history?: WorkflowEvent[]
+    /** Optional agent state for mid-trace agent resumption */
+    agentState?: AgentState
   }
   try {
     payload = JSON.parse(raw)
@@ -88,12 +152,19 @@ async function main() {
     return
   }
 
-  const { workflowsModulePath, toolsModulePath, workflowName, args, input } = payload
+  const { workflowsModulePath, toolsModulePath, workflowName, args, input, replayMode = false, checkpoint = 0, history = [], agentState } = payload
 
   const { context, finalise } = startTraceSession()
   setCurrentTrace(context.trace)
 
+  const recorder = new TraceRecorder()
+  const replay = new ReplayController(replayMode, checkpoint, history)
+  setCaptureContext({ recorder, replay })
+
   // Inject wrapped tools into global scope so the workflow can call them
+  // NOTE: This only works if the workflow accesses tools as globals, not via import.
+  // If the workflow uses import { tool } from './tools', the injected global will NOT be used.
+  // For maximum robustness, prefer passing tools as explicit arguments or context.
   const globals = global as Record<string, unknown>
   const originalValues: Record<string, unknown> = {}
   let wrappedTools: Record<string, (...a: unknown[]) => unknown> = {}
@@ -109,6 +180,7 @@ async function main() {
   // Intercept process.exit() so that workflows that call it internally (e.g. agent
   // frameworks that call process.exit(0) after completing) don't kill the subprocess
   // before we write the result.
+  // WARNING: This only intercepts process.exit() in this scope. Libraries that cache their own reference to process.exit may still terminate the process.
   let pendingExitCode: number | undefined
   ;(process as NodeJS.Process).exit = (code?: number) => {
     pendingExitCode = code ?? 0
@@ -119,21 +191,43 @@ async function main() {
   let workflowError: Error | undefined
 
   try {
-    const workflowsMod = await import(workflowsModulePath)
-    const workflowFn = workflowsMod[workflowName]
-    if (typeof workflowFn !== 'function') {
-      ;(process as NodeJS.Process).exit = originalExit
-      await writeResult({ ok: false, error: `"${workflowName}" is not an exported function in the workflow module.` })
-      originalExit(1)
-      return
-    }
-
+    await installDBAutoInterceptor()
     installAIInterceptor()
+    interceptFetch()
+    interceptRandom()
+    interceptDateNow()
+
     try {
-      const callArgs = args.length > 0 ? args : input !== null && input !== undefined ? [input] : []
-      currentOutput = await (workflowFn as (...a: unknown[]) => unknown)(...callArgs)
+      if (agentState) {
+        // Agent mid-trace resumption path: load ed_agents and resume from saved state
+        const agentsModulePath = workflowsModulePath.replace(/ed_workflows(\.[^.]+)?$/, 'ed_agents$1')
+        const agentsMod = await import(pathToFileURL(agentsModulePath).href)
+        if (typeof agentsMod.resumeAgentFromTrace !== 'function') {
+          throw new Error(`"resumeAgentFromTrace" is not an exported function in ${agentsModulePath}`)
+        }
+        currentOutput = await (agentsMod.resumeAgentFromTrace as (s: AgentState) => Promise<unknown>)(agentState)
+        console.error('[worker] resumeAgentFromTrace resolved, currentOutput:', currentOutput)
+      } else {
+        // Standard workflow path
+        const workflowsMod = await import(pathToFileURL(workflowsModulePath).href)
+        const workflowFn = workflowsMod[workflowName]
+        if (typeof workflowFn !== 'function') {
+          ;(process as NodeJS.Process).exit = originalExit
+          await writeResult({ ok: false, error: `"${workflowName}" is not an exported function in the workflow module.` })
+          originalExit(1)
+          return
+        }
+        // Standardize workflow argument resolution: always pass [input] if args is empty
+        const callArgs = args.length ? args : [input]
+        currentOutput = await (workflowFn as (...a: unknown[]) => unknown)(...callArgs)
+        console.error('[worker] workflowFn resolved, currentOutput:', currentOutput)  // stderr so it's visible
+      }
     } finally {
       uninstallAIInterceptor()
+      restoreFetch()
+      restoreRandom()
+      restoreDateNow()
+      uninstallDBAutoInterceptor()
     }
   } catch (e) {
     workflowError = e instanceof Error ? e : new Error(String(e))
@@ -150,6 +244,7 @@ async function main() {
       }
     }
     setCurrentTrace(undefined)
+    setCaptureContext(undefined)
     finalise()
   }
 
@@ -158,6 +253,7 @@ async function main() {
     llmSteps: context.trace.getLLMSteps(),
     toolCalls: context.trace.getToolCalls(),
     customSteps: context.trace.getCustomSteps(),
+    workflowTrace: recorder.toTrace(),
   }
 
   if (workflowError) {
@@ -169,4 +265,14 @@ async function main() {
   }
 }
 
-main()
+
+main().catch((err) => {
+  // Write error to fd3 and exit
+  try {
+    fs.write(3, JSON.stringify({ ok: false, error: err && err.message ? err.message : String(err) }) + '\n', () => {
+      process.exit(1);
+    });
+  } catch (e) {
+    process.exit(1);
+  }
+});

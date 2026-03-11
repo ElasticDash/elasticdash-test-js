@@ -1,8 +1,10 @@
 import { getCurrentTrace } from '../trace-adapter/context.js'
+import { getCaptureContext } from '../capture/recorder.js'
+import { rawDateNow } from './side-effects.js'
 
 /** URL patterns for known AI providers */
 const AI_PATTERNS: Record<string, RegExp> = {
-  openai: /https?:\/\/api\.openai\.com\/v1\/(chat\/)?completions/,
+  openai: /https?:\/\/api\.openai\.com\/v1\/((chat\/)?completions|embeddings)/,
   gemini: /https?:\/\/generativelanguage\.googleapis\.com\/.*\/models\/[^/:]+:(generateContent|streamGenerateContent)/,
   grok:   /https?:\/\/api\.x\.ai\/v1\/(chat\/)?completions/,
   kimi:   /https?:\/\/api\.moonshot\.ai\/v1\/(chat\/)?completions/,
@@ -42,7 +44,10 @@ function extractPrompt(provider: string, body: Record<string, unknown>): string 
         .join('\n')
     }
     // Legacy completions API
-    return typeof body.prompt === 'string' ? body.prompt : ''
+    if (typeof body.prompt === 'string') return body.prompt
+    if (typeof body.input === 'string') return body.input
+    if (Array.isArray(body.input)) return body.input.map((v) => String(v)).join('\n')
+    return ''
   }
 
   if (provider === 'gemini') {
@@ -72,6 +77,11 @@ function extractPrompt(provider: string, body: Record<string, unknown>): string 
 
 /** Extract completion text from response body */
 function extractCompletion(provider: string, responseBody: Record<string, unknown>): string {
+  // Handle buffered streaming format
+  if (responseBody.streamed === true && typeof responseBody.completion === 'string') {
+    return responseBody.completion
+  }
+
   if (provider === 'openai' || provider === 'grok' || provider === 'kimi') {
     const choices = responseBody.choices
     if (Array.isArray(choices) && choices.length > 0) {
@@ -80,6 +90,14 @@ function extractCompletion(provider: string, responseBody: Record<string, unknow
         return String((first.message as Record<string, unknown>).content ?? '')
       }
       if (typeof first.text === 'string') return first.text
+    }
+    // Embedding response: data[].embedding
+    const data = responseBody.data
+    if (Array.isArray(data) && data.length > 0) {
+      const first = data[0] as Record<string, unknown>
+      if (Array.isArray(first?.embedding)) {
+        return `[${data.length} embedding(s), ${first.embedding.length} dimensions]`
+      }
     }
   }
 
@@ -94,9 +112,125 @@ function extractCompletion(provider: string, responseBody: Record<string, unknow
         }
       }
     }
+    // Gemini embedding response: embeddings[].values
+    const embeddings = responseBody.embeddings
+    if (Array.isArray(embeddings) && embeddings.length > 0) {
+      const first = embeddings[0] as Record<string, unknown>
+      if (Array.isArray(first?.values)) {
+        return `[${embeddings.length} embedding(s), ${first.values.length} dimensions]`
+      }
+    }
   }
 
   return ''
+}
+
+/** Buffer a streaming SSE/NDJSON response to extract the completion text */
+async function bufferSSEStream(
+  provider: string,
+  stream: ReadableStream<Uint8Array>,
+): Promise<string> {
+  const decoder = new TextDecoder()
+  const reader = stream.getReader()
+  let raw = ''
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      raw += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const lines = raw.split('\n')
+  let completion = ''
+
+  if (provider === 'gemini') {
+    // NDJSON: lines may be wrapped in `[` / `]` / `,`
+    for (const line of lines) {
+      const trimmed = line.trim().replace(/^[,\[]/, '').replace(/[,\]]$/, '')
+      if (!trimmed) continue
+      try {
+        const obj = JSON.parse(trimmed) as Record<string, unknown>
+        const candidates = obj.candidates
+        if (Array.isArray(candidates) && candidates.length > 0) {
+          const first = candidates[0] as Record<string, unknown>
+          if (first.content && typeof first.content === 'object') {
+            const parts = (first.content as Record<string, unknown>).parts
+            if (Array.isArray(parts) && parts.length > 0) {
+              completion += String((parts[0] as Record<string, unknown>).text ?? '')
+            }
+          }
+        }
+      } catch {
+        // skip unparseable lines
+      }
+    }
+  } else {
+    // OpenAI / Grok / Kimi SSE format
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const data = line.slice(6).trim()
+      if (data === '[DONE]') continue
+      try {
+        const obj = JSON.parse(data) as Record<string, unknown>
+        const choices = obj.choices
+        if (Array.isArray(choices) && choices.length > 0) {
+          const first = choices[0] as Record<string, unknown>
+          if (first.delta && typeof first.delta === 'object') {
+            completion += String((first.delta as Record<string, unknown>).content ?? '')
+          }
+        }
+      } catch {
+        // skip unparseable lines
+      }
+    }
+  }
+
+  return completion
+}
+
+/** Build a minimal non-streaming JSON response body from a completion string (for replay) */
+function synthesizeCompletionJSON(
+  provider: string,
+  completion: string,
+): Record<string, unknown> {
+  if (provider === 'gemini') {
+    return {
+      candidates: [{ content: { parts: [{ text: completion }], role: 'model' }, finishReason: 'STOP' }],
+    }
+  }
+  // OpenAI / Grok / Kimi format
+  return {
+    id: 'replay',
+    object: 'chat.completion',
+    choices: [{ index: 0, message: { role: 'assistant', content: completion }, finish_reason: 'stop' }],
+  }
+}
+
+/** Build a minimal SSE/NDJSON ReadableStream from a completion string (for replay) */
+function synthesizeSSEStream(
+  provider: string,
+  completion: string,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+
+  return new ReadableStream<Uint8Array>({
+    start(ctrl) {
+      if (provider === 'gemini') {
+        const chunk = `[{"candidates":[{"content":{"parts":[{"text":${JSON.stringify(completion)}}],"role":"model"},"finishReason":"STOP"}]}]\n`
+        ctrl.enqueue(encoder.encode(chunk))
+      } else {
+        const frame1 = `data: ${JSON.stringify({ id: 'replay', choices: [{ delta: { content: completion }, index: 0, finish_reason: null }] })}\n\n`
+        const frame2 = 'data: [DONE]\n\n'
+        ctrl.enqueue(encoder.encode(frame1))
+        ctrl.enqueue(encoder.encode(frame2))
+      }
+      ctrl.close()
+    },
+  })
 }
 
 // Keep a reference to the original fetch so we can restore it
@@ -142,21 +276,113 @@ export function installAIInterceptor(): void {
       // Ignore parse errors — still pass through
     }
 
-    // Make the actual request
-    const response = await originalFetch!(input, init)
+    const ctx = getCaptureContext()
 
-    if (traceAtCall) {
+    if (ctx) {
+      const { recorder, replay } = ctx
+      const id = recorder.nextId()
+      const start = rawDateNow()
+
+      // Replay mode: return the historical response without making a real call
+      if (replay.shouldReplay(id)) {
+        const historicalEvent = replay.getRecordedEvent(id)
+        const historicalInput = historicalEvent?.input as Record<string, unknown> | undefined
+        const historicalUrl = typeof historicalInput?.url === 'string' ? historicalInput.url : undefined
+        const historicalProvider = typeof historicalInput?.provider === 'string' ? historicalInput.provider : undefined
+        const isReplayMatch = !!historicalEvent
+          && historicalEvent.type === 'ai'
+          && historicalProvider === provider
+          && historicalUrl === url
+
+        if (isReplayMatch && historicalEvent) {
+          recorder.record(historicalEvent)
+          const historicalOutput = historicalEvent.output as Record<string, unknown> | null
+          const completion = historicalOutput ? extractCompletion(provider, historicalOutput) : '(replayed)'
+          traceAtCall.recordLLMStep({ model, provider, prompt, completion, workflowEventId: id })
+
+          if (isStreaming) {
+            // Current caller expects a streaming response — always synthesize SSE
+            return new Response(synthesizeSSEStream(provider, completion), {
+              status: 200,
+              headers: { 'Content-Type': provider === 'gemini' ? 'application/json' : 'text/event-stream' },
+            })
+          }
+
+          if (historicalOutput?.streamed === true) {
+            // Original was streamed but caller now expects JSON — synthesize a completion response
+            return new Response(JSON.stringify(synthesizeCompletionJSON(provider, completion)), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          }
+
+          return new Response(
+            historicalOutput != null ? JSON.stringify(historicalOutput) : null,
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        // No historical event found — fall through to fresh execution
+      }
+
+      // Fresh execution: make the real call and record to both systems
+      const response = await originalFetch!(input, init)
+      const durationMs = rawDateNow() - start
+
       if (isStreaming) {
-        traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed)' })
+        if (response.body) {
+          const [streamForCaller, streamForRecorder] = response.body.tee()
+          bufferSSEStream(provider, streamForRecorder).then((completion) => {
+            const durationMs = rawDateNow() - start
+            traceAtCall.recordLLMStep({ model, provider, prompt, completion, workflowEventId: id })
+            recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: { streamed: true, completion }, timestamp: start, durationMs })
+          }).catch(() => {
+            traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed-error)', workflowEventId: id })
+            recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: null, timestamp: start, durationMs: rawDateNow() - start })
+          })
+          return new Response(streamForCaller, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          })
+        } else {
+          traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed)', workflowEventId: id })
+          recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: null, timestamp: start, durationMs })
+        }
       } else {
         try {
           const cloned = response.clone()
           const responseBody = await cloned.json() as Record<string, unknown>
           const completion = extractCompletion(provider, responseBody)
-          traceAtCall.recordLLMStep({ model, provider, prompt, completion })
+          traceAtCall.recordLLMStep({ model, provider, prompt, completion, workflowEventId: id })
+          recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: responseBody, timestamp: start, durationMs })
         } catch {
-          traceAtCall.recordLLMStep({ model, provider, prompt, completion: '' })
+          traceAtCall.recordLLMStep({ model, provider, prompt, completion: '', workflowEventId: id })
+          recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: null, timestamp: start, durationMs })
         }
+      }
+
+      return response
+    }
+
+    // No capture context — original behaviour (outside of a workflow run)
+    const response = await originalFetch!(input, init)
+
+    if (isStreaming && response.body) {
+      const [streamForCaller, streamForRecorder] = response.body.tee()
+      bufferSSEStream(provider, streamForRecorder).then((completion) => {
+        traceAtCall.recordLLMStep({ model, provider, prompt, completion })
+      }).catch(() => {
+        traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed-error)' })
+      })
+      return new Response(streamForCaller, { status: response.status, statusText: response.statusText, headers: response.headers })
+    } else if (!isStreaming) {
+      try {
+        const cloned = response.clone()
+        const responseBody = await cloned.json() as Record<string, unknown>
+        const completion = extractCompletion(provider, responseBody)
+        traceAtCall.recordLLMStep({ model, provider, prompt, completion })
+      } catch {
+        traceAtCall.recordLLMStep({ model, provider, prompt, completion: '' })
       }
     }
 
