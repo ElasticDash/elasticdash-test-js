@@ -12,6 +12,73 @@ function toTraceArgs(input: unknown): Record<string, unknown> | undefined {
   return { value: input }
 }
 
+function isReadableStream(v: unknown): v is ReadableStream<Uint8Array> {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    typeof (v as ReadableStream).getReader === 'function' &&
+    typeof (v as ReadableStream).tee === 'function'
+  )
+}
+
+function isAsyncIterable(v: unknown): v is AsyncIterable<unknown> {
+  return typeof v === 'object' && v !== null && Symbol.asyncIterator in (v as object)
+}
+
+async function bufferReadableStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const decoder = new TextDecoder()
+  const reader = stream.getReader()
+  let raw = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      raw += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return raw
+}
+
+function reconstructStream(raw: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  return new ReadableStream<Uint8Array>({
+    start(ctrl) {
+      ctrl.enqueue(encoder.encode(raw))
+      ctrl.close()
+    },
+  })
+}
+
+/** Wraps an AsyncIterable so chunks are collected while the caller iterates */
+function wrapAsyncIterable<T>(
+  source: AsyncIterable<T>,
+  onComplete: (chunks: T[]) => void,
+): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]() {
+      const iter = source[Symbol.asyncIterator]()
+      const collected: T[] = []
+      return {
+        async next() {
+          const result = await iter.next()
+          if (!result.done) {
+            collected.push(result.value)
+          } else {
+            onComplete(collected)
+          }
+          return result
+        },
+        async return(value?: unknown) {
+          onComplete(collected)
+          return iter.return ? iter.return(value) : { done: true as const, value: undefined }
+        },
+      }
+    },
+  }
+}
+
 export function wrapTool<Args extends unknown[], R>(
   name: string,
   fn: (...args: Args) => Promise<R>,
@@ -28,6 +95,16 @@ export function wrapTool<Args extends unknown[], R>(
     if (replay.shouldReplay(id)) {
       const historical = replay.getRecordedEvent(id)
       if (historical) recorder.record(historical)
+
+      if (historical?.streamed === true) {
+        const raw = typeof historical.streamRaw === 'string' ? historical.streamRaw : ''
+        const stream = reconstructStream(raw) as unknown as R
+        if (trace && typeof trace.recordToolCall === 'function') {
+          trace.recordToolCall({ name, args: toTraceArgs(input), result: stream, workflowEventId: id })
+        }
+        return stream
+      }
+
       const replayed = replay.getRecordedResult(id) as R
       if (trace && typeof trace.recordToolCall === 'function') {
         trace.recordToolCall({ name, args: toTraceArgs(input), result: replayed, workflowEventId: id })
@@ -42,6 +119,32 @@ export function wrapTool<Args extends unknown[], R>(
 
     try {
       const output = await fn(...args)
+
+      if (isReadableStream(output)) {
+        const [streamForCaller, streamForRecorder] = output.tee()
+        bufferReadableStream(streamForRecorder).then((rawText) => {
+          recorder.record({ id, type: 'tool', name, input, output: null, streamed: true, streamRaw: rawText, timestamp: start, durationMs: rawDateNow() - start })
+        }).catch(() => {
+          recorder.record({ id, type: 'tool', name, input, output: null, streamed: true, streamRaw: '', timestamp: start, durationMs: rawDateNow() - start })
+        })
+        const result = streamForCaller as unknown as R
+        if (trace && typeof trace.recordToolCall === 'function') {
+          trace.recordToolCall({ name, args: toTraceArgs(input), result, workflowEventId: id })
+        }
+        return result
+      }
+
+      if (isAsyncIterable(output)) {
+        const wrapped = wrapAsyncIterable(output, (chunks) => {
+          const rawText = chunks.map((c) => (typeof c === 'string' ? c : JSON.stringify(c))).join('')
+          recorder.record({ id, type: 'tool', name, input, output: null, streamed: true, streamRaw: rawText, timestamp: start, durationMs: rawDateNow() - start })
+        }) as unknown as R
+        if (trace && typeof trace.recordToolCall === 'function') {
+          trace.recordToolCall({ name, args: toTraceArgs(input), result: wrapped, workflowEventId: id })
+        }
+        return wrapped
+      }
+
       recorder.record({
         id,
         type: 'tool',

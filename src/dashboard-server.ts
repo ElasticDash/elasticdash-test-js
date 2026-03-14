@@ -84,11 +84,26 @@ interface RerunResult {
   error?: string
 }
 
+/** Per-tool mock configuration sent from the dashboard UI */
+export interface ToolMockEntry {
+  /** 'live' = always call real tool, 'mock-all' = mock every call, 'mock-specific' = mock only listed call indices */
+  mode: 'live' | 'mock-all' | 'mock-specific'
+  /** When mode is 'mock-specific', which 1-based call indices to mock */
+  callIndices?: number[]
+  /** Mock data keyed by 1-based call index (or 0 for mock-all default) */
+  mockData?: Record<number, unknown>
+}
+
+export interface ToolMockConfig {
+  [toolName: string]: ToolMockEntry
+}
+
 interface WorkflowValidationBody {
   workflowName?: unknown
   runCount?: unknown
   sequential?: unknown
   observations?: unknown
+  toolMockConfig?: unknown
 }
 
 interface ValidationRunTrace {
@@ -334,7 +349,7 @@ function runWorkflowInSubprocess(
   workflowName: string,
   args: unknown[],
   input: unknown,
-  options?: { replayMode?: boolean; checkpoint?: number; history?: WorkflowEvent[]; agentState?: AgentState },
+  options?: { replayMode?: boolean; checkpoint?: number; history?: WorkflowEvent[]; agentState?: AgentState; toolMockConfig?: ToolMockConfig },
 ): Promise<WorkflowSubprocessResult> {
   return new Promise((resolve) => {
     const workerScript = new URL('./workflow-runner-worker.js', import.meta.url).pathname
@@ -388,6 +403,7 @@ function runWorkflowInSubprocess(
       ...(options?.checkpoint !== undefined ? { checkpoint: options.checkpoint } : {}),
       ...(options?.history !== undefined ? { history: options.history } : {}),
       ...(options?.agentState !== undefined ? { agentState: options.agentState } : {}),
+      ...(options?.toolMockConfig !== undefined ? { toolMockConfig: options.toolMockConfig } : {}),
     })
     child.stdin.write(payload)
     child.stdin.end() // Always close stdin to avoid subprocess hang
@@ -451,7 +467,9 @@ async function runGenerationObservation(observation: DashboardObservation): Prom
 
 async function rerunObservation(cwd: string, observation: DashboardObservation, tools: ToolInfo[]): Promise<RerunResult> {
   const type = observation.type?.toUpperCase()
-  if (type === 'TOOL') {
+  const name = observation.name ?? '(unknown)'
+  if (type === 'TOOL' || name.startsWith('tool-')) {
+    observation.name = name.startsWith('tool-') ? name.slice(5) : name // Support both explicit type and name prefix for tool observations
     return runToolObservation(cwd, observation, tools)
   }
   if (type === 'GENERATION') {
@@ -502,7 +520,9 @@ function resolveWorkflowArgsFromObservations(body: WorkflowValidationBody, workf
   }) as DashboardObservation | undefined
 
   if (!matched) {
-    return { error: `No matching observation found for workflow "${workflowName}".` }
+    // No workflow-level observation found (e.g. trace was loaded from an external format that
+    // only contains child observations). Fall back to running the workflow with no arguments.
+    return { args: [], input: null }
   }
 
   return { args: normalizeWorkflowArgs(matched.input), input: matched.input }
@@ -759,6 +779,12 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
   const workflowArgs = resolvedInput.args ?? []
   const workflowInput = resolvedInput.input ?? null
 
+  // Parse tool mock config if provided
+  const toolMockConfig: ToolMockConfig | undefined =
+    body.toolMockConfig && typeof body.toolMockConfig === 'object' && !Array.isArray(body.toolMockConfig)
+      ? body.toolMockConfig as ToolMockConfig
+      : undefined
+
   const workflowsModulePath = resolveWorkflowModule(cwd)
   if (!workflowsModulePath) {
     return {
@@ -783,6 +809,7 @@ async function validateWorkflowRuns(cwd: string, body: WorkflowValidationBody): 
       workflowName,
       workflowArgs,
       workflowInput,
+      toolMockConfig ? { toolMockConfig } : undefined,
     )
     .catch(err => {
       throw { ok: false, error: `Workflow subprocess failed: ${formatError(err)}` }

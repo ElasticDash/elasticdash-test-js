@@ -4,10 +4,11 @@ import { rawDateNow } from './side-effects.js'
 
 /** URL patterns for known AI providers */
 const AI_PATTERNS: Record<string, RegExp> = {
-  openai: /https?:\/\/api\.openai\.com\/v1\/((chat\/)?completions|embeddings)/,
-  gemini: /https?:\/\/generativelanguage\.googleapis\.com\/.*\/models\/[^/:]+:(generateContent|streamGenerateContent)/,
-  grok:   /https?:\/\/api\.x\.ai\/v1\/(chat\/)?completions/,
-  kimi:   /https?:\/\/api\.moonshot\.ai\/v1\/(chat\/)?completions/,
+  openai:    /https?:\/\/api\.openai\.com\/v1\/((chat\/)?completions|embeddings)/,
+  anthropic: /https?:\/\/api\.anthropic\.com\/v1\/messages/,
+  gemini:    /https?:\/\/generativelanguage\.googleapis\.com\/.*\/models\/[^\/:]+:(generateContent|streamGenerateContent)/,
+  grok:      /https?:\/\/api\.x\.ai\/v1\/(chat\/)?completions/,
+  kimi:      /https?:\/\/api\.moonshot\.ai\/v1\/(chat\/)?completions/,
 }
 
 /** Detect which provider (if any) a URL belongs to */
@@ -30,20 +31,52 @@ function extractModel(provider: string, body: Record<string, unknown>, url: stri
 
 /** Extract prompt text from request body */
 function extractPrompt(provider: string, body: Record<string, unknown>): string {
-  if (provider === 'openai' || provider === 'grok' || provider === 'kimi') {
+  if (provider === 'openai' || provider === 'anthropic' || provider === 'grok' || provider === 'kimi') {
+    let systemPrefix = ''
+    // Anthropic supports a top-level `system` parameter
+    if (provider === 'anthropic') {
+      if (typeof body.system === 'string') {
+        systemPrefix = `system: ${body.system}\n`
+      } else if (Array.isArray(body.system)) {
+        systemPrefix = body.system
+          .map((b: unknown) => {
+            if (b && typeof b === 'object') {
+              return String((b as Record<string, unknown>).text ?? '')
+            }
+            return String(b)
+          })
+          .filter(Boolean)
+          .map((t) => `system: ${t}`)
+          .join('\n') + '\n'
+      }
+    }
     const messages = body.messages
     if (Array.isArray(messages)) {
-      return messages
+      const msgText = messages
         .map((m: unknown) => {
           if (m && typeof m === 'object') {
             const msg = m as Record<string, unknown>
-            return `${msg.role}: ${msg.content}`
+            // Anthropic content can be a string or an array of content blocks
+            let content = msg.content
+            if (Array.isArray(content)) {
+              content = content
+                .map((b: unknown) => {
+                  if (b && typeof b === 'object') {
+                    return String((b as Record<string, unknown>).text ?? '')
+                  }
+                  return String(b)
+                })
+                .filter(Boolean)
+                .join('')
+            }
+            return `${msg.role}: ${content}`
           }
           return String(m)
         })
         .join('\n')
+      return systemPrefix + msgText
     }
-    // Legacy completions API
+    // Legacy completions API (OpenAI)
     if (typeof body.prompt === 'string') return body.prompt
     if (typeof body.input === 'string') return body.input
     if (Array.isArray(body.input)) return body.input.map((v) => String(v)).join('\n')
@@ -98,6 +131,22 @@ function extractCompletion(provider: string, responseBody: Record<string, unknow
       if (Array.isArray(first?.embedding)) {
         return `[${data.length} embedding(s), ${first.embedding.length} dimensions]`
       }
+    }
+  }
+
+  if (provider === 'anthropic') {
+    const content = responseBody.content
+    if (Array.isArray(content)) {
+      return content
+        .map((block: unknown) => {
+          if (block && typeof block === 'object') {
+            const b = block as Record<string, unknown>
+            if (b.type === 'text' && typeof b.text === 'string') return b.text
+          }
+          return ''
+        })
+        .filter(Boolean)
+        .join('')
     }
   }
 
@@ -168,6 +217,23 @@ async function bufferSSEStream(
         // skip unparseable lines
       }
     }
+  } else if (provider === 'anthropic') {
+    // Anthropic SSE format: event: <type>\ndata: <json>
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const data = line.slice(6).trim()
+      try {
+        const obj = JSON.parse(data) as Record<string, unknown>
+        if (obj.type === 'content_block_delta') {
+          const delta = obj.delta as Record<string, unknown> | undefined
+          if (delta && delta.type === 'text_delta' && typeof delta.text === 'string') {
+            completion += delta.text
+          }
+        }
+      } catch {
+        // skip unparseable lines
+      }
+    }
   } else {
     // OpenAI / Grok / Kimi SSE format
     for (const line of lines) {
@@ -202,6 +268,16 @@ function synthesizeCompletionJSON(
       candidates: [{ content: { parts: [{ text: completion }], role: 'model' }, finishReason: 'STOP' }],
     }
   }
+  if (provider === 'anthropic') {
+    return {
+      id: 'replay',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: completion }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+    }
+  }
   // OpenAI / Grok / Kimi format
   return {
     id: 'replay',
@@ -221,8 +297,19 @@ function synthesizeSSEStream(
     start(ctrl) {
       if (provider === 'gemini') {
         const chunk = `[{"candidates":[{"content":{"parts":[{"text":${JSON.stringify(completion)}}],"role":"model"},"finishReason":"STOP"}]}]\n`
-        ctrl.enqueue(encoder.encode(chunk))
-      } else {
+        ctrl.enqueue(encoder.encode(chunk))      } else if (provider === 'anthropic') {
+        const msgStart = `event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { id: 'replay', type: 'message', role: 'assistant', content: [], stop_reason: null, stop_sequence: null } })}\n\n`
+        const blockStart = `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`
+        const delta = `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: completion } })}\n\n`
+        const blockStop = `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`
+        const msgDelta = `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null } })}\n\n`
+        const msgStop = `event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`
+        ctrl.enqueue(encoder.encode(msgStart))
+        ctrl.enqueue(encoder.encode(blockStart))
+        ctrl.enqueue(encoder.encode(delta))
+        ctrl.enqueue(encoder.encode(blockStop))
+        ctrl.enqueue(encoder.encode(msgDelta))
+        ctrl.enqueue(encoder.encode(msgStop))      } else {
         const frame1 = `data: ${JSON.stringify({ id: 'replay', choices: [{ delta: { content: completion }, index: 0, finish_reason: null }] })}\n\n`
         const frame2 = 'data: [DONE]\n\n'
         ctrl.enqueue(encoder.encode(frame1))
@@ -331,14 +418,16 @@ export function installAIInterceptor(): void {
       if (isStreaming) {
         if (response.body) {
           const [streamForCaller, streamForRecorder] = response.body.tee()
-          bufferSSEStream(provider, streamForRecorder).then((completion) => {
-            const durationMs = rawDateNow() - start
-            traceAtCall.recordLLMStep({ model, provider, prompt, completion, workflowEventId: id })
-            recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: { streamed: true, completion }, timestamp: start, durationMs })
-          }).catch(() => {
-            traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed-error)', workflowEventId: id })
-            recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: null, timestamp: start, durationMs: rawDateNow() - start })
-          })
+          recorder.trackAsync(
+            bufferSSEStream(provider, streamForRecorder).then((completion) => {
+              const durationMs = rawDateNow() - start
+              traceAtCall.recordLLMStep({ model, provider, prompt, completion, workflowEventId: id })
+              recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: { streamed: true, completion }, timestamp: start, durationMs })
+            }).catch(() => {
+              traceAtCall.recordLLMStep({ model, provider, prompt, completion: '(streamed-error)', workflowEventId: id })
+              recorder.record({ id, type: 'ai', name: model, input: { url, provider, model, prompt }, output: null, timestamp: start, durationMs: rawDateNow() - start })
+            })
+          )
           return new Response(streamForCaller, {
             status: response.status,
             statusText: response.statusText,

@@ -64,6 +64,143 @@ function pickReplayResponseHeaders(headers?: Record<string, unknown>): Record<st
   return out
 }
 
+function isStreamingContentType(headers: Headers): boolean {
+  const ct = headers.get('content-type') ?? ''
+  return (
+    ct.includes('text/event-stream') ||
+    ct.includes('application/x-ndjson') ||
+    ct.includes('application/stream+json') ||
+    ct.includes('application/jsonl') ||
+    headers.get('x-vercel-ai-data-stream') === 'v1'
+  )
+}
+
+function isVercelAIDataStream(headers: Headers): boolean {
+  return headers.get('x-vercel-ai-data-stream') === 'v1'
+}
+
+interface VercelAIStreamResult {
+  type: 'text' | 'result' | 'plan' | 'error'
+  message: string
+  refinedQuery?: string
+  sessionId?: string
+  awaitingApproval?: boolean
+  executionPlan?: unknown[]
+  error?: string
+  planRejected?: boolean
+}
+
+function parseVercelAIDataStream(raw: string): VercelAIStreamResult {
+  let accumulatedText = ''
+  let resultData: Record<string, unknown> = {}
+  let errorMessage = ''
+  let hasError = false
+
+  for (const line of raw.split('\n')) {
+    if (!line) continue
+    const colonIdx = line.indexOf(':')
+    if (colonIdx === -1) continue
+    const prefix = line.slice(0, colonIdx)
+    const payload = line.slice(colonIdx + 1)
+    try {
+      if (prefix === '0') {
+        accumulatedText += JSON.parse(payload) as string
+      } else if (prefix === '2') {
+        const events = JSON.parse(payload) as Array<Record<string, unknown>>
+        for (const event of events) {
+          if (event.type === 'result' || event.type === 'plan') {
+            resultData = { ...resultData, ...event }
+          }
+        }
+      } else if (prefix === '3') {
+        hasError = true
+        errorMessage = JSON.parse(payload) as string
+      }
+    } catch {
+      // ignore malformed frames
+    }
+  }
+
+  if (hasError) {
+    return { message: errorMessage, type: 'error', error: errorMessage }
+  }
+  if (accumulatedText) {
+    return { message: accumulatedText, type: 'text', refinedQuery: resultData.refinedQuery as string | undefined }
+  }
+  if (resultData.type === 'plan') {
+    return {
+      message: (resultData.message as string) ?? '',
+      type: 'plan',
+      sessionId: resultData.sessionId as string | undefined,
+      awaitingApproval: true,
+      executionPlan: resultData.executionPlan as unknown[] | undefined,
+      refinedQuery: resultData.refinedQuery as string | undefined,
+    }
+  }
+  return {
+    message: (resultData.message as string) ?? '',
+    type: 'result',
+    refinedQuery: resultData.refinedQuery as string | undefined,
+    error: resultData.error as string | undefined,
+    planRejected: resultData.planRejected as boolean | undefined,
+  }
+}
+
+export type { VercelAIStreamResult }
+
+/**
+ * Reads a Vercel AI SDK data-stream response to completion and returns a
+ * structured result. Use this inside workflow functions that call the streaming
+ * endpoint via fetch so the framework can intercept and replay the call.
+ *
+ * @param response - The fetch Response whose body carries the
+ *                   `x-vercel-ai-data-stream: v1` wire protocol.
+ */
+export async function readVercelAIStream(response: Response): Promise<VercelAIStreamResult> {
+  if (!response.body) {
+    return { message: 'No response body', type: 'error', error: 'No response body' }
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let raw = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      raw += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return parseVercelAIDataStream(raw)
+}
+
+async function bufferStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const decoder = new TextDecoder()
+  const reader = stream.getReader()
+  let raw = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      raw += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return raw
+}
+
+function reconstructStream(raw: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  return new ReadableStream<Uint8Array>({
+    start(ctrl) {
+      ctrl.enqueue(encoder.encode(raw))
+      ctrl.close()
+    },
+  })
+}
+
 let originalFetch: typeof globalThis.fetch | undefined
 
 export function interceptFetch(): void {
@@ -115,6 +252,15 @@ export function interceptFetch(): void {
             : undefined,
         )
 
+        if (historicalEvent.streamed === true) {
+          const raw = typeof historicalEvent.streamRaw === 'string' ? historicalEvent.streamRaw : ''
+          return new Response(reconstructStream(raw), {
+            status: replayStatus,
+            statusText: replayStatusText,
+            headers: replayHeaders,
+          })
+        }
+
         const historicalOutput = replay.getRecordedResult(id)
         const body = historicalOutput != null ? JSON.stringify(historicalOutput) : null
         return new Response(body, {
@@ -132,6 +278,66 @@ export function interceptFetch(): void {
     const start = Date.now()
     const res = await originalFetch!(input, init)
 
+    const responseHeadersObj: Record<string, string> = {}
+    res.headers.forEach((v, k) => {
+      responseHeadersObj[k] = v
+    })
+
+    const elasticdashResponse = {
+      status: res.status,
+      statusText: res.statusText,
+      headers: responseHeadersObj,
+      url: res.url,
+    }
+
+    const baseInput = {
+      url,
+      method,
+      ...(query ? { query } : {}),
+      ...(body !== undefined ? { body } : {}),
+      ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
+      __elasticdashResponse: elasticdashResponse,
+    }
+
+    if (isStreamingContentType(res.headers) && res.body) {
+      const [streamForCaller, streamForRecorder] = res.body.tee()
+      const vercelAI = isVercelAIDataStream(res.headers)
+
+      recorder.trackAsync(
+        bufferStream(streamForRecorder).then((rawText) => {
+          recorder.record({
+            id,
+            type: 'http',
+            name: 'fetch',
+            input: baseInput,
+            output: vercelAI ? parseVercelAIDataStream(rawText) : null,
+            streamed: true,
+            streamRaw: rawText,
+            timestamp: start,
+            durationMs: Date.now() - start,
+          })
+        }).catch(() => {
+          recorder.record({
+            id,
+            type: 'http',
+            name: 'fetch',
+            input: baseInput,
+            output: null,
+            streamed: true,
+            streamRaw: '',
+            timestamp: start,
+            durationMs: Date.now() - start,
+          })
+        })
+      )
+
+      return new Response(streamForCaller, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      })
+    }
+
     let output: unknown = null
     try {
       output = await res.clone().json()
@@ -139,28 +345,11 @@ export function interceptFetch(): void {
       // not JSON — record null
     }
 
-    const responseHeadersObj: Record<string, string> = {}
-    res.headers.forEach((v, k) => {
-      responseHeadersObj[k] = v
-    })
-
     recorder.record({
       id,
       type: 'http',
       name: 'fetch',
-      input: {
-        url,
-        method,
-        ...(query ? { query } : {}),
-        ...(body !== undefined ? { body } : {}),
-        ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
-        __elasticdashResponse: {
-          status: res.status,
-          statusText: res.statusText,
-          headers: responseHeadersObj,
-          url: res.url,
-        },
-      },
+      input: baseInput,
       output,
       timestamp: start,
       durationMs: Date.now() - start,

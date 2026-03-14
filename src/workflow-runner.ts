@@ -42,6 +42,7 @@ export async function runWorkflow<T = unknown>(
 
   try {
     const result = await workflowFn()
+    await recorder.flush()
     return { result, trace: recorder.toTrace() }
   } finally {
     if (interceptHttp) restoreFetch()
