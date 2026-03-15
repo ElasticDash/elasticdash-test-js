@@ -56,17 +56,32 @@ function writeResult(result: unknown): Promise<void> {
   })
 }
 
+/** Per-tool mock configuration sent from the dashboard UI */
+interface ToolMockEntry {
+  mode: 'live' | 'mock-all' | 'mock-specific'
+  callIndices?: number[]
+  mockData?: Record<number, unknown>
+}
+
+interface ToolMockConfig {
+  [toolName: string]: ToolMockEntry
+}
+
 /** Minimal inline tool-wrapping — records each tool call to the trace. */
 async function loadAndWrapTools(
   toolsModulePath: string,
   trace: TraceHandle,
+  toolMockConfig?: ToolMockConfig,
 ): Promise<Record<string, (...a: unknown[]) => unknown>> {
   try {
     // Use absolute file URL for ESM import
     const toolsMod = await import(pathToFileURL(toolsModulePath).href)
     const wrapped: Record<string, (...a: unknown[]) => unknown> = {}
+    // Track per-tool call counters for mock-specific mode
+    const toolCallCounters: Record<string, number> = {}
     for (const [name, fn] of Object.entries(toolsMod)) {
       if (typeof fn !== 'function') continue
+      const mockEntry = toolMockConfig?.[name]
       wrapped[name] = new Proxy(fn as (...a: unknown[]) => unknown, {
         apply(target, thisArg, args) {
           const recordedArgs = args.length === 1 ? args[0] : args
@@ -81,6 +96,41 @@ async function loadAndWrapTools(
             const replayed = ctx.replay.getRecordedResult(id)
             trace.recordToolCall({ name, args: recordedArgs, result: replayed, workflowEventId: id })
             return replayed
+          }
+
+          // Mock: check if this tool call should be mocked
+          if (mockEntry && mockEntry.mode !== 'live') {
+            // Increment call counter for this tool (1-based)
+            if (!toolCallCounters[name]) toolCallCounters[name] = 0
+            toolCallCounters[name]++
+            const callNumber = toolCallCounters[name]
+
+            let shouldMock = false
+            let mockResult: unknown
+
+            if (mockEntry.mode === 'mock-all') {
+              shouldMock = true
+              // Use per-call mock data if available, otherwise default (key 0)
+              const data = mockEntry.mockData ?? {}
+              mockResult = data[callNumber] !== undefined ? data[callNumber] : data[0]
+            } else if (mockEntry.mode === 'mock-specific') {
+              const indices = mockEntry.callIndices ?? []
+              if (indices.includes(callNumber)) {
+                shouldMock = true
+                const data = mockEntry.mockData ?? {}
+                mockResult = data[callNumber]
+              }
+            }
+
+            if (shouldMock) {
+              if (ctx) ctx.recorder.record({ id, type: 'tool', name, input: recordedArgs, output: mockResult, timestamp: start, durationMs: 0 })
+              trace.recordToolCall({ name, args: recordedArgs, result: mockResult, workflowEventId: id })
+              return Promise.resolve(mockResult)
+            }
+          } else {
+            // Still track call count even for live tools
+            if (!toolCallCounters[name]) toolCallCounters[name] = 0
+            toolCallCounters[name]++
           }
 
           const g = globalThis as Record<string, unknown>
@@ -143,6 +193,8 @@ async function main() {
     history?: WorkflowEvent[]
     /** Optional agent state for mid-trace agent resumption */
     agentState?: AgentState
+    /** Optional tool mock configuration from the dashboard UI */
+    toolMockConfig?: ToolMockConfig
   }
   try {
     payload = JSON.parse(raw)
@@ -152,7 +204,7 @@ async function main() {
     return
   }
 
-  const { workflowsModulePath, toolsModulePath, workflowName, args, input, replayMode = false, checkpoint = 0, history = [], agentState } = payload
+  const { workflowsModulePath, toolsModulePath, workflowName, args, input, replayMode = false, checkpoint = 0, history = [], agentState, toolMockConfig } = payload
 
   const { context, finalise } = startTraceSession()
   setCurrentTrace(context.trace)
@@ -170,7 +222,7 @@ async function main() {
   let wrappedTools: Record<string, (...a: unknown[]) => unknown> = {}
 
   if (toolsModulePath) {
-    wrappedTools = await loadAndWrapTools(toolsModulePath, context.trace)
+    wrappedTools = await loadAndWrapTools(toolsModulePath, context.trace, toolMockConfig)
     for (const [name, fn] of Object.entries(wrappedTools)) {
       originalValues[name] = globals[name]
       globals[name] = fn
@@ -191,6 +243,10 @@ async function main() {
   let workflowError: Error | undefined
 
   try {
+    // Write mock config to globals so module-imported tools can read it via resolveMock()
+    ;(globalThis as any).__ELASTICDASH_TOOL_MOCKS__ = toolMockConfig ?? {}
+    ;(globalThis as any).__ELASTICDASH_TOOL_CALL_COUNTERS__ = {}
+
     await installDBAutoInterceptor()
     installAIInterceptor()
     interceptFetch()
@@ -246,7 +302,13 @@ async function main() {
     setCurrentTrace(undefined)
     setCaptureContext(undefined)
     finalise()
+
+    // Clear mock globals
+    delete (globalThis as any).__ELASTICDASH_TOOL_MOCKS__
+    delete (globalThis as any).__ELASTICDASH_TOOL_CALL_COUNTERS__
   }
+
+  await recorder.flush()
 
   const traceData = {
     steps: context.trace.getSteps(),

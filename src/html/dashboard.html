@@ -268,13 +268,200 @@
             }
             };
             
+            // ---- Tool Mock Config State ----
+            window._toolMockConfig = {}; // { toolName: { mode: 'live'|'mock-all'|'mock-specific', callIndices: [], mockData: {} } }
+
+            function getToolsFromTrace() {
+                // Extract unique tool names and their call details from the uploaded trace observations
+                const toolCalls = {};
+                currentObservations.forEach(function(obs, i) {
+                    if (obs.type !== 'TOOL') return;
+                    const name = obs.name || '(unknown)';
+                    if (!toolCalls[name]) toolCalls[name] = [];
+                    toolCalls[name].push({ index: toolCalls[name].length + 1, obsIndex: i, input: obs.input, output: obs.output });
+                });
+                return toolCalls;
+            }
+
+            function getAllRegisteredTools() {
+                // From codeIndex.tools (fetched at page load from /api/code-index)
+                return (codeIndex.tools || []).map(function(t) { return t.name; });
+            }
+
+            function buildToolMockConfigFromUI() {
+                const config = {};
+                const rows = document.querySelectorAll('.tool-mock-row');
+                rows.forEach(function(row) {
+                    const toolName = row.dataset.toolName;
+                    const modeSelect = row.querySelector('.tool-mock-mode');
+                    const mode = modeSelect ? modeSelect.value : 'live';
+                    if (mode === 'live') return;
+                    const entry = { mode: mode };
+                    if (mode === 'mock-specific') {
+                        const checkboxes = row.querySelectorAll('.tool-call-checkbox:checked');
+                        entry.callIndices = Array.from(checkboxes).map(function(cb) { return parseInt(cb.value, 10); });
+                        if (entry.callIndices.length === 0) return; // No calls selected, treat as live
+                    }
+                    // Collect mock data
+                    entry.mockData = {};
+                    const dataInputs = row.querySelectorAll('.tool-mock-data-input');
+                    dataInputs.forEach(function(inp) {
+                        const callIdx = parseInt(inp.dataset.callIdx, 10);
+                        if (!inp.value.trim()) return;
+                        try { entry.mockData[callIdx] = JSON.parse(inp.value); }
+                        catch(e) { entry.mockData[callIdx] = inp.value; }
+                    });
+                    config[toolName] = entry;
+                });
+                return config;
+            }
+
+            function cleanValue(value) {
+                if (typeof value === "string") {
+                    value = value.replaceAll('\\"', '');
+                    // remove surrounding quotes if they exist
+                    if (value.startsWith('"') && value.endsWith('"')) {
+                        return value.slice(1, -1);
+                    }
+                    return value;
+                }
+
+                if (Array.isArray(value)) {
+                    return value.map(cleanValue);
+                }
+
+                if (typeof value === "object" && value !== null) {
+                    const result = {};
+                    for (const key in value) {
+                    result[key] = cleanValue(value[key]);
+                    }
+                    return result;
+                }
+
+                return value;
+            }
+
+            function convert(input) {
+                const parsed = JSON.parse(input);
+                return cleanValue(parsed);
+            }
+
+            function renderToolMockSection(showAll) {
+                const traceTools = getToolsFromTrace();
+                const allToolNames = getAllRegisteredTools();
+                const traceToolNames = Object.keys(traceTools);
+                const toolNames = showAll
+                    ? Array.from(new Set([...traceToolNames, ...allToolNames]))
+                    : traceToolNames;
+
+                if (toolNames.length === 0) {
+                    return '<div style="color:#999;font-size:13px;padding:6px 0;">No tools detected.</div>';
+                }
+
+                let html = '<div style="max-height:260px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:6px;">';
+                html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+                html += '<thead><tr style="background:#f5f5f5;">';
+                html += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e0e0e0;">Tool</th>';
+                html += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e0e0e0;">Calls in Trace</th>';
+                html += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e0e0e0;">Mock Mode</th>';
+                html += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid #e0e0e0;">Details</th>';
+                html += '</tr></thead><tbody>';
+
+                toolNames.forEach(function(name) {
+                    const calls = traceTools[name] || [];
+                    const inTrace = traceToolNames.includes(name);
+                    const existing = window._toolMockConfig[name] || { mode: 'live' };
+                    const nameStyle = inTrace ? '' : 'color:#999;';
+
+                    html += '<tr class="tool-mock-row" data-tool-name="' + esc(name) + '" style="border-bottom:1px solid #f0f0f0;">';
+                    html += '<td style="padding:6px 10px;font-family:Monaco,monospace;' + nameStyle + '">' + esc(name) + (inTrace ? '' : ' <span style="font-size:10px;color:#aaa;">(not in trace)</span>') + '</td>';
+                    html += '<td style="padding:6px 10px;">' + calls.length + '</td>';
+                    html += '<td style="padding:6px 10px;">';
+                    html += '<select class="tool-mock-mode" style="font-size:12px;padding:2px 4px;" onchange="window.onToolMockModeChange(\'' + esc(name) + '\', this.value)">';
+                    html += '<option value="live"' + (existing.mode === 'live' ? ' selected' : '') + '>Live</option>';
+                    html += '<option value="mock-all"' + (existing.mode === 'mock-all' ? ' selected' : '') + '>Mock All Calls</option>';
+                    if (calls.length > 0) {
+                        html += '<option value="mock-specific"' + (existing.mode === 'mock-specific' ? ' selected' : '') + '>Mock Specific Calls</option>';
+                    }
+                    html += '</select>';
+                    html += '</td>';
+
+                    // Details column: per-call checkboxes + mock data inputs
+                    html += '<td style="padding:6px 10px;">';
+                    if (existing.mode === 'mock-all') {
+                        let defaultData = (existing.mockData && existing.mockData[0] !== undefined) ? JSON.stringify(existing.mockData[0]) : (calls.length > 0 ? JSON.stringify(calls[0].output) : '');
+                        defaultData = convert(defaultData);
+                        html += '<div style="font-size:11px;color:#555;margin-bottom:4px;">Mock data (JSON):</div>';
+                        html += '<textarea class="tool-mock-data-input" data-call-idx="0" style="width:100%;font-size:11px;font-family:Monaco,monospace;padding:4px;border:1px solid #ddd;border-radius:4px;min-height:32px;resize:vertical;" placeholder="Return value for all calls">' + esc(defaultData) + '</textarea>';
+                    } else if (existing.mode === 'mock-specific' && calls.length > 0) {
+                        html += '<div style="font-size:11px;color:#555;margin-bottom:4px;">Select calls to mock:</div>';
+                        calls.forEach(function(call) {
+                            const isChecked = existing.callIndices && existing.callIndices.includes(call.index);
+                            const inputPreview = typeof call.input === 'string' ? call.input.slice(0, 40) : JSON.stringify(call.input || '').slice(0, 40);
+                            let mockVal = (existing.mockData && existing.mockData[call.index] !== undefined) ? JSON.stringify(existing.mockData[call.index]) : JSON.stringify(call.output);
+                            mockVal = convert(mockVal);
+                            html += '<div style="margin-bottom:6px;padding:4px;background:#fafafa;border-radius:4px;border:1px solid #eee;">';
+                            html += '<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">';
+                            html += '<input type="checkbox" class="tool-call-checkbox" value="' + call.index + '"' + (isChecked ? ' checked' : '') + ' onchange="window.onToolCallCheckChange(\'' + esc(name) + '\',' + call.index + ',this.checked)">';
+                            html += '<span>Call #' + call.index + '</span>';
+                            html += '<span style="color:#888;font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(inputPreview) + '</span>';
+                            html += '</label>';
+                            if (isChecked) {
+                                html += '<textarea class="tool-mock-data-input" data-call-idx="' + call.index + '" style="width:100%;font-size:11px;font-family:Monaco,monospace;padding:4px;border:1px solid #ddd;border-radius:4px;min-height:28px;resize:vertical;margin-top:4px;" placeholder="Mock return value (JSON)">' + esc(mockVal) + '</textarea>';
+                            }
+                            html += '</div>';
+                        });
+                    } else {
+                        html += '<span style="color:#aaa;font-size:11px;">—</span>';
+                    }
+                    html += '</td>';
+                    html += '</tr>';
+                });
+
+                html += '</tbody></table></div>';
+                return html;
+            }
+
+            window.onToolMockModeChange = function(toolName, mode) {
+                if (!window._toolMockConfig[toolName]) window._toolMockConfig[toolName] = { mode: 'live' };
+                // Save current mock data before switching
+                window._toolMockConfig[toolName] = { ...window._toolMockConfig[toolName], mode: mode };
+                if (mode === 'mock-specific' && !window._toolMockConfig[toolName].callIndices) {
+                    window._toolMockConfig[toolName].callIndices = [];
+                }
+                // Re-render tool mock section
+                const showAll = document.getElementById('showAllToolsToggle');
+                const container = document.getElementById('toolMockContainer');
+                if (container) container.innerHTML = renderToolMockSection(showAll && showAll.checked);
+            };
+
+            window.onToolCallCheckChange = function(toolName, callIdx, checked) {
+                if (!window._toolMockConfig[toolName]) window._toolMockConfig[toolName] = { mode: 'mock-specific', callIndices: [] };
+                const indices = window._toolMockConfig[toolName].callIndices || [];
+                if (checked && !indices.includes(callIdx)) {
+                    indices.push(callIdx);
+                } else if (!checked) {
+                    const pos = indices.indexOf(callIdx);
+                    if (pos >= 0) indices.splice(pos, 1);
+                }
+                window._toolMockConfig[toolName].callIndices = indices;
+                const showAll = document.getElementById('showAllToolsToggle');
+                const container = document.getElementById('toolMockContainer');
+                if (container) container.innerHTML = renderToolMockSection(showAll && showAll.checked);
+            };
+
             window.openLiveValidationDialog = function() {
                 if (window.liveValidationDialog) return;
+                window._toolMockConfig = {}; // Reset mock config each time dialog opens
+
+                const hasTraceTools = currentObservations.some(function(o) { return o.type === 'TOOL'; });
+                const hasRegisteredTools = codeIndex.tools && codeIndex.tools.length > 0;
+
                 window.liveValidationDialog = document.createElement('div');
                 window.liveValidationDialog.id = 'liveValidationDialog';
                 window.liveValidationDialog.style = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center;z-index:9999;';
                 window.liveValidationDialog.innerHTML = `
-                    <div style="background:white;padding:32px 28px;border-radius:12px;box-shadow:0 2px 24px #0002;min-width:600px;max-width:90vw;">
+                    <div style="background:white;padding:32px 28px;border-radius:12px;box-shadow:0 2px 24px #0002;min-width:680px;max-width:90vw;max-height:90vh;overflow-y:auto;">
                     <h3 style="margin-top:0;margin-bottom:18px;font-size:20px;">Validate Updated Flow with Live Data</h3>
                     <label style="font-size:15px;display:block;margin-bottom:8px;">How many times do you want to run the flow with live data?</label>
                     <input id="liveValidationCount" type="number" min="1" value="1" style="width:100%;font-size:16px;padding:6px 10px;margin-bottom:18px;" />
@@ -282,6 +469,17 @@
                         <input id="liveValidationSequential" type="checkbox" />
                         Run in sequence instead of parallel
                     </label>
+                    ${(hasTraceTools || hasRegisteredTools) ? `
+                    <div style="border-top:1px solid #eee;padding-top:16px;margin-bottom:16px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                            <div style="font-size:15px;font-weight:600;">Tool Mocking</div>
+                            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+                                <input id="showAllToolsToggle" type="checkbox" onchange="document.getElementById('toolMockContainer').innerHTML = renderToolMockSection(this.checked);" />
+                                Show all registered tools
+                            </label>
+                        </div>
+                        <div id="toolMockContainer"></div>
+                    </div>` : ''}
                     <div style="display:flex;gap:12px;justify-content:space-between;align-items:center;">
                         <span id="liveValidationProgress" style="font-size:14px;color:#555;"></span>
                         <div style="display:flex;gap:12px;">
@@ -292,6 +490,11 @@
                     </div>
                 `;
                 document.body.appendChild(window.liveValidationDialog);
+                // Render the tool mock section after DOM insertion
+                const toolMockContainer = document.getElementById('toolMockContainer');
+                if (toolMockContainer) {
+                    toolMockContainer.innerHTML = renderToolMockSection(false);
+                }
                 document.getElementById('cancelLiveValidation').onclick = function() {
                     window.liveValidationDialog.remove();
                     window.liveValidationDialog = null;
@@ -300,65 +503,76 @@
                     const count = parseInt(document.getElementById('liveValidationCount').value, 10);
                     const sequential = document.getElementById('liveValidationSequential').checked;
                     if (count >= 1) {
+                        // Build the tool mock config from UI state
+                        const toolMockConfig = buildToolMockConfigFromUI();
                         const submitBtn = document.getElementById('submitLiveValidation');
                         submitBtn.disabled = true;
                         submitBtn.textContent = 'Validating...';
                         const progressEl = document.getElementById('liveValidationProgress');
-                        if (progressEl) progressEl.textContent = `0 of ${count} workflow runs`;
-                        let completed = 0;
-                        // Wrap the fetch in a progress simulation for user feedback
-                        const payload = { workflowName: selectedWorkflow?.name, runCount: count, sequential, observations: currentObservations };
-                        // Start the fetch but also update progress as we go
-                        const progressInterval = setInterval(() => {
-                            if (progressEl && completed < count) {
-                                progressEl.textContent = `${completed} of ${count} workflow runs`;
-                            }
-                        }, 200);
-                        try {
-                            const responsePromise = fetch('/api/validate-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                            // Simulate progress incrementing as if runs are happening (for demo, increment every 500ms)
-                            while (completed < count) {
-                                await new Promise(r => setTimeout(r, 500));
-                                completed++;
-                                if (progressEl) progressEl.textContent = `${completed} of ${count} workflow runs`;
-                            }
-                            const response = await responsePromise;
-                            const data = await response.json();
-                            clearInterval(progressInterval);
+
+                        function finishValidation(collectedTraces, errorMsg, usedSequential) {
                             if (progressEl) progressEl.textContent = '';
                             window.liveValidationDialog.remove();
                             window.liveValidationDialog = null;
                             window.liveValidationCount = count;
-                            window.liveValidationSequential = sequential;
+                            window.liveValidationSequential = usedSequential;
                             window.step5SelectedTrace = 0;
                             window.step5SelectedObservation = 0;
                             currentStep = 5;
                             updateModalTitle();
                             updateFooterButtons();
-                            if (response.ok && data.ok) {
-                                step5RunTraces = Array.isArray(data.traces) ? data.traces : [];
-                                persistTraces();
-                                step5RunMeta = { loading: false, error: '', runCount: typeof data.runCount === 'number' ? data.runCount : count, sequential: data.mode === 'sequential' };
-                            } else {
+                            if (errorMsg && collectedTraces.length === 0) {
                                 step5RunTraces = [];
                                 localStorage.removeItem('ed_step5RunTraces');
-                                step5RunMeta = { loading: false, error: data.error || 'Workflow validation failed.', runCount: count, sequential };
+                                step5RunMeta = { loading: false, error: errorMsg, runCount: count, sequential: usedSequential };
+                            } else {
+                                step5RunTraces = collectedTraces;
+                                persistTraces();
+                                step5RunMeta = { loading: false, error: '', runCount: collectedTraces.length, sequential: usedSequential };
                             }
-                        } catch (err) {
-                            clearInterval(progressInterval);
-                            if (progressEl) progressEl.textContent = '';
-                            window.liveValidationDialog.remove();
-                            window.liveValidationDialog = null;
-                            currentStep = 5;
-                            updateModalTitle();
-                            updateFooterButtons();
-                            step5RunTraces = [];
-                            localStorage.removeItem('ed_step5RunTraces');
-                            step5RunMeta = { loading: false, error: err && err.message ? err.message : String(err), runCount: count, sequential };
+                            if (window.step5SelectedTrace > step5RunTraces.length) window.step5SelectedTrace = 0;
+                            window.step5SelectedObservation = 0;
+                            renderObservationTable();
                         }
-                        if (window.step5SelectedTrace > step5RunTraces.length) window.step5SelectedTrace = 0;
-                        window.step5SelectedObservation = 0;
-                        renderObservationTable();
+
+                        if (sequential) {
+                            // Sequential mode: fire one request per run so progress reflects real completion
+                            if (progressEl) progressEl.textContent = `0 of ${count} workflow runs completed`;
+                            const collectedTraces = [];
+                            let fatalError = null;
+                            for (let i = 0; i < count; i++) {
+                                const singlePayload = { workflowName: selectedWorkflow?.name, runCount: 1, sequential: false, observations: currentObservations, toolMockConfig };
+                                try {
+                                    const response = await fetch('/api/validate-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(singlePayload) });
+                                    const data = await response.json();
+                                    if (response.ok && data.ok && Array.isArray(data.traces) && data.traces.length > 0) {
+                                        collectedTraces.push({ ...data.traces[0], runNumber: i + 1 });
+                                    } else {
+                                        // Push an error trace so the run is still visible in Step 5
+                                        collectedTraces.push({ runNumber: i + 1, ok: false, error: data.error || 'Workflow validation failed.', observations: [], workflowTrace: null });
+                                    }
+                                } catch (err) {
+                                    collectedTraces.push({ runNumber: i + 1, ok: false, error: err && err.message ? err.message : String(err), observations: [], workflowTrace: null });
+                                }
+                                if (progressEl) progressEl.textContent = `${i + 1} of ${count} workflow runs completed`;
+                            }
+                            finishValidation(collectedTraces, fatalError, true);
+                        } else {
+                            // Parallel mode: single bulk request
+                            if (progressEl) progressEl.textContent = `Running ${count} workflow run${count !== 1 ? 's' : ''} in parallel…`;
+                            const payload = { workflowName: selectedWorkflow?.name, runCount: count, sequential: false, observations: currentObservations, toolMockConfig };
+                            try {
+                                const response = await fetch('/api/validate-workflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                                const data = await response.json();
+                                if (response.ok && data.ok) {
+                                    finishValidation(Array.isArray(data.traces) ? data.traces : [], null, false);
+                                } else {
+                                    finishValidation([], data.error || 'Workflow validation failed.', false);
+                                }
+                            } catch (err) {
+                                finishValidation([], err && err.message ? err.message : String(err), false);
+                            }
+                        }
                     } else {
                         document.getElementById('liveValidationCount').style.borderColor = 'red';
                     }

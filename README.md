@@ -225,6 +225,45 @@ In manual mode, always isolate tracing in a separate `try/catch` so trace loggin
 
 **→ See [Tool Recording & Replay](docs/tools.md) for checkpoint-based replay and freezing**
 
+### HTTP Streaming Capture and Replay
+
+ElasticDash also captures non-AI `fetch` responses that stream over HTTP (for example SSE and NDJSON endpoints) in the HTTP interceptor.
+
+Currently detected as streaming when response `content-type` includes:
+- `text/event-stream`
+- `application/x-ndjson`
+- `application/stream+json`
+- `application/jsonl`
+
+How it behaves today:
+- During live execution, ElasticDash tees the response stream and returns a real stream to your app code.
+- In parallel, ElasticDash buffers the recorder side of the stream as raw text for trace replay.
+- During replay, ElasticDash reconstructs a stream from that captured raw payload and restores status, status text, and response headers.
+
+Replay fidelity note:
+- Replay preserves stream payload content, but not original chunk boundaries or timing cadence.
+
+Minimal stream consumption example:
+
+```ts
+const res = await fetch('https://example.com/events')
+if (!res.body) throw new Error('Expected a streaming response body')
+
+const reader = res.body.getReader()
+const decoder = new TextDecoder()
+let buffer = ''
+
+for (;;) {
+  const { done, value } = await reader.read()
+  if (done) break
+  buffer += decoder.decode(value, { stream: true })
+}
+
+buffer += decoder.decode()
+```
+
+**→ See [Quick Start Guide](docs/quickstart.md#capture-streaming-flows) for end-to-end setup guidance**
+
 ---
 
 ## Configuration

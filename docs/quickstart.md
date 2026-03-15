@@ -21,6 +21,7 @@ Get ElasticDash running in 10 minutes and start debugging your workflows.
   - [Step 11: Select Problematic Step(s)](#step-11-select-problematic-steps)
   - [Step 12: Modify Code and Re-Run Selected Steps](#step-12-modify-code-and-re-run-selected-steps)
   - [Step 13: Re-Run the Full Workflow](#step-13-re-run-the-full-workflow)
+  - [Capture Streaming Flows](#capture-streaming-flows)
   - [Next Steps](#next-steps)
 
 ---
@@ -301,6 +302,46 @@ npx elasticdash dashboard
 
 1. Run `Validate with Live Data`
 2. Confirm end-to-end output is now correct
+
+## Capture Streaming Flows
+
+ElasticDash can capture and replay non-AI HTTP streaming responses (for example SSE/NDJSON endpoints) automatically when your workflow uses normal `fetch`.
+
+Use this checklist for streaming workflows:
+
+1. Keep stream requests on standard `fetch` calls so the HTTP interceptor can observe them.
+2. Ensure the upstream response uses a streaming content type:
+   - `text/event-stream`
+   - `application/x-ndjson`
+   - `application/stream+json`
+   - `application/jsonl`
+3. Consume `Response.body` as a stream in your app logic.
+4. Run the workflow/test once live to record stream payloads.
+5. Re-run with replay to validate deterministic stream-content behavior.
+
+Minimal consumer example:
+
+```ts
+const response = await fetch('https://example.com/stream')
+if (!response.body) throw new Error('Missing stream body')
+
+const reader = response.body.getReader()
+const decoder = new TextDecoder()
+let raw = ''
+
+for (;;) {
+  const { done, value } = await reader.read()
+  if (done) break
+  raw += decoder.decode(value, { stream: true })
+}
+
+raw += decoder.decode()
+```
+
+Replay caveat:
+
+- ElasticDash preserves payload text and response metadata (status/statusText/headers).
+- ElasticDash replay does not preserve original chunk timing or chunk boundaries.
 
 ## Next Steps
 

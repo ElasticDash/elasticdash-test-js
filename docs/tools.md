@@ -2,6 +2,8 @@
 
 ElasticDash automatically records and traces tool calls during workflow execution, providing replay and debugging capabilities.
 
+For HTTP response streaming capture (SSE/NDJSON fetch flows), see `README.md` and `docs/quickstart.md#capture-streaming-flows`. That behavior is handled by the HTTP interceptor and is separate from manual tool instrumentation in this document.
+
 ## Manual Tool Recording
 
 For tools outside the normal import flow, or if you need explicit success/error logging control, use a resilient `recordToolCall` pattern where tracing is isolated from the main service path:

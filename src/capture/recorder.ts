@@ -7,9 +7,21 @@ export class TraceRecorder {
   events: WorkflowEvent[] = []
   private _counter = 0
   private _sideEffectCounter = 0
+  private _pending: Set<Promise<void>> = new Set()
 
   record(event: WorkflowEvent): void {
     this.events.push(event)
+  }
+
+  /** Register an in-flight async recording promise so flush() can await it. */
+  trackAsync(promise: Promise<void>): void {
+    this._pending.add(promise)
+    promise.finally(() => { this._pending.delete(promise) })
+  }
+
+  /** Await all in-flight async recordings. No-op when none are pending. */
+  async flush(): Promise<void> {
+    await Promise.allSettled([...this._pending])
   }
 
   nextId(): number {
