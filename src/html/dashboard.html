@@ -398,7 +398,8 @@
                         calls.forEach(function(call) {
                             const isChecked = existing.callIndices && existing.callIndices.includes(call.index);
                             const inputPreview = typeof call.input === 'string' ? call.input.slice(0, 40) : JSON.stringify(call.input || '').slice(0, 40);
-                            const mockVal = (existing.mockData && existing.mockData[call.index] !== undefined) ? JSON.stringify(existing.mockData[call.index]) : JSON.stringify(call.output);
+                            let mockVal = (existing.mockData && existing.mockData[call.index] !== undefined) ? JSON.stringify(existing.mockData[call.index]) : JSON.stringify(call.output);
+                            mockVal = convert(mockVal);
                             html += '<div style="margin-bottom:6px;padding:4px;background:#fafafa;border-radius:4px;border:1px solid #eee;">';
                             html += '<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">';
                             html += '<input type="checkbox" class="tool-call-checkbox" value="' + call.index + '"' + (isChecked ? ' checked' : '') + ' onchange="window.onToolCallCheckChange(\'' + esc(name) + '\',' + call.index + ',this.checked)">';
