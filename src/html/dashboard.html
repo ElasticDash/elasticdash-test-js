@@ -503,8 +503,9 @@
                     const count = parseInt(document.getElementById('liveValidationCount').value, 10);
                     const sequential = document.getElementById('liveValidationSequential').checked;
                     if (count >= 1) {
-                        // Build the tool mock config from UI state
+                        // Build the tool mock config from UI state and persist for "Run from here"
                         const toolMockConfig = buildToolMockConfigFromUI();
+                        window._toolMockConfig = toolMockConfig;
                         const submitBtn = document.getElementById('submitLiveValidation');
                         submitBtn.disabled = true;
                         submitBtn.textContent = 'Validating...';
@@ -1207,6 +1208,7 @@
                         checkpoint: obs.workflowEventId,
                         snapshotId: liveTrace.snapshotId,
                         observations: currentObservations,
+                        toolMockConfig: window._toolMockConfig || {},
                     };
                     const response = await fetch('/api/run-from-breakpoint', {
                         method: 'POST',
@@ -1261,6 +1263,7 @@
                             resumeFromTaskIndex: taskIndex,
                         },
                         snapshotId: liveTrace.snapshotId,
+                        toolMockConfig: window._toolMockConfig || {},
                     };
                     const response = await fetch('/api/resume-agent-from-task', {
                         method: 'POST',

@@ -360,12 +360,30 @@ If your project uses TypeScript path aliases (e.g., `@/lib/...`) or loads TypeSc
 - `tsx/esm` and `tsx/cjs` handle mixed ESM/CJS module loading at runtime
 - `tsconfig-paths/register` resolves path aliases from your `tsconfig.json` (e.g., `@/lib` → `./src/lib`)
 
+
 **How to check if you're using ESM or CJS:**
 
-Check your `package.json`:
+There are two main indicators for your module system:
 
-- `"type": "module"` = ESM (uses `import`)
-- No `type` field or `"type": "commonjs"` = CJS (uses `require`)
+1. **`package.json`**
+  - `"type": "module"` → ESM (Node.js treats `.js` as ESM, uses `import`/`export`)
+  - `"type": "commonjs"` or no `type` field → CJS (Node.js treats `.js` as CommonJS, uses `require`/`module.exports`)
+
+2. **`tsconfig.json`** (for TypeScript projects)
+  - `"module": "commonjs"` → TypeScript emits CommonJS (`require`/`module.exports`)
+  - `"module": "esnext"`, `"es2020"`, etc. → TypeScript emits ESM (`import`/`export`)
+  - `"module": "nodenext"` or `"node16"` → Ambiguous; TypeScript output matches the `package.json` `type` field per file
+
+**Quick reference table:**
+
+| `package.json` `type`      | `tsconfig.json` `module` | Resulting Module System |
+|----------------------------|--------------------------|------------------------|
+| `"module"`                | `esnext`/`es2020`        | ESM                    |
+| `"module"`                | `nodenext`/`node16`      | ESM                    |
+| `"commonjs"` or missing   | `commonjs`               | CJS                    |
+| `"commonjs"` or missing   | `nodenext`/`node16`      | CJS                    |
+
+> **Tip:** If you see `"module": "commonjs"` in your `tsconfig.json`, your project is almost certainly CJS, even if `package.json` has no `type` field.
 
 **You need the advanced script when:**
 

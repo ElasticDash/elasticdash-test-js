@@ -1264,6 +1264,7 @@ export async function startDashboardServer(
             history?: unknown
             snapshotId?: unknown
             observations?: unknown
+            toolMockConfig?: unknown
           }
           const workflowName = typeof body.workflowName === 'string' ? body.workflowName.trim() : ''
           if (!workflowName) {
@@ -1299,6 +1300,11 @@ export async function startDashboardServer(
 
           const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools') ?? null
 
+          const toolMockConfig: ToolMockConfig | undefined =
+            body.toolMockConfig && typeof body.toolMockConfig === 'object' && !Array.isArray(body.toolMockConfig)
+              ? body.toolMockConfig as ToolMockConfig
+              : undefined
+
           const frozenEventIds = new Set(
             history
               .filter((event) => (
@@ -1315,7 +1321,7 @@ export async function startDashboardServer(
             workflowName,
             workflowArgs,
             workflowInput,
-            { replayMode: true, checkpoint, history },
+            { replayMode: true, checkpoint, history, ...(toolMockConfig ? { toolMockConfig } : {}) },
           )
 
           const traceStub = {
@@ -1355,6 +1361,7 @@ export async function startDashboardServer(
             agentState?: unknown
             history?: unknown
             snapshotId?: unknown
+            toolMockConfig?: unknown
           }
 
           const workflowName = typeof body.workflowName === 'string' ? body.workflowName.trim() : ''
@@ -1396,6 +1403,11 @@ export async function startDashboardServer(
 
           const toolsModulePath = resolveRuntimeModule(cwd, 'ed_tools') ?? null
 
+          const toolMockConfig: ToolMockConfig | undefined =
+            body.toolMockConfig && typeof body.toolMockConfig === 'object' && !Array.isArray(body.toolMockConfig)
+              ? body.toolMockConfig as ToolMockConfig
+              : undefined
+
           console.log(`[elasticdash] Resume agent from task: workflow="${workflowName}" taskIndex=${taskIndex}`)
 
           const result = await runWorkflowInSubprocess(
@@ -1404,7 +1416,7 @@ export async function startDashboardServer(
             workflowName,
             [],
             null,
-            { replayMode: history.length > 0, checkpoint: 0, history, agentState },
+            { replayMode: history.length > 0, checkpoint: 0, history, agentState, ...(toolMockConfig ? { toolMockConfig } : {}) },
           )
 
           const traceStub = {
