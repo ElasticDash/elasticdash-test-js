@@ -2,9 +2,30 @@
 
 Get ElasticDash running in 10 minutes and start debugging your AI workflows.
 
+## Implementation Checklist
+
+Use this checklist to ensure your ElasticDash setup and workflow instrumentation are complete. Each item links to the relevant section below:
+
+- [ ] [Install the SDK](#install-the-sdk)
+- [ ] [Configure Environment Variables](#configure-environment-variables)
+- [ ] [Create `ed_workflows.ts`](#create-ed_workflowsts)
+  - [ ] [Handle Streaming Workflows (if needed)](#streaming-workflows)
+- [ ] [Create `ed_tools.ts`](#create-ed_toolsts)
+- [ ] [Update Workflow Tool Calls](#update-workflow-tool-calls)
+- [ ] [Add Dashboard Script to `package.json`](#add-dashboard-script-to-packagejson)
+- [ ] [Check ESM/CJS Module System](#how-to-check-if-youre-using-esm-or-cjs)
+- [ ] [Write and Run Example Test](#end-to-end-example)
+- [ ] [Open the Dashboard](#open-the-dashboard)
+- [ ] [(Optional) Get Trace Data from Langfuse](#get-trace-data-from-langfuse)
+- [ ] [(Optional) Debug with the Dashboard](#debug-with-the-dashboard)
+- [ ] [(Optional) Capture Streaming Flows](#capture-streaming-flows)
+
+---
+
 ## Table of Contents
 
 - [Quick Start Guide](#quick-start-guide)
+  - [Implementation Checklist](#implementation-checklist)
   - [Table of Contents](#table-of-contents)
   - [Section 1: Installation \& Configuration](#section-1-installation--configuration)
     - [Install the SDK](#install-the-sdk)
